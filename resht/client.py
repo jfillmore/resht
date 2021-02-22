@@ -1,14 +1,12 @@
-#!/usr/bin/python -tt
+"""
+Client for talking to a webserver.
+"""
 
 # TODO:
 # - JSON body for GET requests
 
-
-"""
-Client for talking to a RESTful server. Maybe just even a regular web server.
-"""
-
 from collections import namedtuple
+from typing import Union
 import base64
 import http.cookies
 import json
@@ -26,61 +24,79 @@ from . import util
 Response = namedtuple('Response', ['obj', 'decoded', 'data'])
 
 
-class ApiException(Exception):
-    def __init__(self, error, response):
+class HttpError(Exception):
+    """
+    HTTP return code 300-399. Base class for all other HTTP exceptions.
+    """
+    def __init__(self, error, response: Response):
         self.response = response
         super().__init__(error)
 
 
-class RESTClient:
+class UserHttpError(HttpError):
     """
-    Client for talking to a RESTful server.
+    HTTP return code 400-499.
+    """
+    pass
+
+
+class ServerHttpError(HttpError):
+    """
+    HTTP return code >= 500
+    """
+    pass
+
+
+class RestClient:
+    """
+    Client for talking to a web server using RESTful methods.
     """
 
-    def __init__(self, url='localhost', insecure=False):
+    def __init__(self, base_url:str = 'localhost', insecure:bool = False):
         # the base URL information for construction API requests
-        self.url = None
+        self.base_url = None
         self.cookies = {}  # session cookie cache
         # if set, an oauth/basic authentication header will be included in each request
         self.oauth = None
         self.basic_auth = None
-        self.set_url(url)
+        self.set_base_url(base_url)
         self.ssl_ctx = ssl.create_default_context()
         if insecure:
             self.ssl_ctx.check_hostname = False
             self.ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    def _build_url(self, path, query):
+    def build_url(self, path:str, query:str = None) -> str:
+        """
+        Returns the full URL with the path given and any query string
+        parameters to add. If the path contains a query string the additional
+        query param values will overwrite them.
+        """
         path = util.pretty_path(
-            '/'.join(['', self.url['path'], path]),
+            '/'.join(['', self.base_url['path'], path]),
             True,
             False
         )
-        port = self.url['port']
+        port = self.base_url['port']
         if port == 80 or port == 443:
             port = ''
         else:
             port = ':' + str(port)
         url = '%s://%s%s%s' % (
-            self.url['scheme'], self.url['hostname'], port, path
+            self.base_url['scheme'], self.base_url['hostname'], port, path
         )
         # has the base URL been set to include query params?
-        if self.url['query']:
-            url = self.merge_url_query(url, self.url['query'])
+        if self.base_url['query']:
+            url = self.merge_url_query(url, self.base_url['query'])
         # add in manually passed query args
         if query:
             url = self.merge_url_query(url, query)
-        # with everything merged into the URL, do a final split
-        if url.find('?') >= 0:
-            (url, query) = url.split('?', 1)
-        else:
-            query = ''
-        # return the full URL, as well as our final query
-        return url, query
+        return url
 
-    def parse_url(self, url):
+    def parse_url(self, url) -> dict:
         """
-        Parses a URL into its components. Allows as little information as possible (e.g. just a port, just a path), defaulting to http://localhost:80/.
+        Parses a URL into its components. Allows as little information as
+        possible (e.g. just a port, just a path), defaulting to
+        http://localhost:80/.
         """
         # urlparse just doesn't do it the "right" way...
         # check for protocol and strip it off if found
@@ -120,16 +136,16 @@ class RESTClient:
         parts['fragment'] = parsed.fragment
         return parts
 
-    def set_url(self, url):
+    def set_base_url(self, base_url):
         """
         Sets the base URL for requests. Assumes http://localhost by default.
         """
-        if url == '':
-            raise Exception('Invalid API URL: %s.' % url)
-        url = self.parse_url(url)
-        self.url = url
-        if url['scheme'] != 'http' and url['scheme'] != 'https':
-            raise Exception('Only HTTP and HTTPS are supported protocols.')
+        if not base_url:
+            raise ValueError('Invalid API URL: %s.' % base_url)
+        url = self.parse_url(base_url)
+        if url['scheme'] not in ['http', 'https']:
+            raise ValueError('Only HTTP and HTTPS are supported protocols.')
+        self.base_url = url
         if url['port']:
             self.set_port(url['port'])
         else:
@@ -150,9 +166,9 @@ class RESTClient:
         """
         port = int(port)
         if port >= 0 and port <= 65535:
-            self.url['port'] = port
+            self.base_url['port'] = port
         else:
-            raise Exception('Invalid API service port: %s.' % port)
+            raise ValueError('Invalid API service port: %s.' % port)
 
     def get(self, path, params=None, **opts):
         """
@@ -198,8 +214,16 @@ class RESTClient:
         return self.request('DELETE', path, params, **opts)
 
     def request(
-            self, method, path, params=None, query=None, headers=None,
-            verbose=False, full=False, basic_auth=None, pre_formatted_body=False,
+            self,
+            method:str,
+            path:str,
+            params:dict = None,
+            query:Union[str,list,dict] = None,
+            headers:dict = None,
+            verbose:bool = False,
+            full:bool = False,
+            basic_auth:str = None,
+            pre_formatted_body:bool = False,
         ):
         # normalize the API parameters
         if method is None or method == '':
@@ -216,9 +240,7 @@ class RESTClient:
         # TODO: allow params to be in the request body (e.g. like ElasticSearch prefers)
         if method == 'GET' and params:
             query = self.merge_query(self.build_query(params), query)
-        url, query = self._build_url(path, query)
-        if query:
-            url = '?'.join([url, query])
+        url = self.build_url(path, query)
 
         request_args = {
             'headers': {
@@ -232,7 +254,7 @@ class RESTClient:
             request_args['headers'].update(headers)
         cookies = []
         for name in self.cookies:
-            cookie.append('='.join([name, self.cookies[name]]))
+            cookies.append('='.join([name, self.cookies[name]]))
         if cookies:
             request_args['headers']['Cookie'] = '&'.join(cookies)
         if basic_auth or self.basic_auth:
@@ -278,7 +300,14 @@ class RESTClient:
             response = urllib.request.urlopen(request, context=self.ssl_ctx)
         except urllib.request.HTTPError as error_resp:
             response = error_resp
-        response_data = response.read().decode('utf-8')
+
+        # if we know the type of charset, perform the decoding automatically
+        content_type = response.headers.get('Content-Type')
+        response_data = response.read()
+        if response_data and content_type and ';' in content_type:
+            charset = content_type.split(';')[1].strip()
+            if '=' in charset:
+                response_data = response_data.decode(charset.split('=')[1])
 
         # see if we get a cookie back; note that we ignore the path
         for hdr_name, hdr_value in response.headers.items():
@@ -293,17 +322,21 @@ class RESTClient:
                     for name, val in response.headers.items()
                 }
             )
-        content_type = response.headers.get('Content-Type')
         if not content_type or not content_type.startswith("application/json"):
             decoded = response_data
         else:
             try:
                 decoded = json.loads(response_data)
             except:
-                raise Exception('Failed to decode API response\n' + response_data)
+                raise ValueError('Failed to decode API response\n' + response_data)
         response = Response(obj=response, decoded=decoded, data=response_data)
         if response.obj.status < 200 or response.obj.status >= 400:
-            raise ApiException(
+            error_cls = HttpError
+            if response.obj.status >= 500:
+                error_cls = ServerHttpError
+            elif response.obj.status >= 400:
+                error_cls = UserHttpError
+            raise error_cls(
                 '"%s %s" failed (%s)' % (
                     method, path, response.obj.status
                 ),
@@ -399,7 +432,3 @@ class RESTClient:
                 else:
                     return headers[key] == value
         return None
-
-
-if __name__ == '__main__':
-    dbg.pretty_print(RESTClient())

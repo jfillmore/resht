@@ -96,7 +96,7 @@ class Shell:
         self.data_store = {}
         # parse out our initial args
         self.args = self.parse_args(argv, self.main_args)
-        self.client = client.RESTClient(self.args['url'], self.args['insecure'])
+        self.client = client.RestClient(self.args['url'], self.args['insecure'])
         if self.args['help']:
             return
         # run our initial command, possibly invoking shell mode after
@@ -481,7 +481,7 @@ EXAMPLES:
                 response = answer.decoded
                 response_status = None
                 success = True
-            except client.ApiException as e:
+            except client.HttpError as e:
                 success = False
                 response_status = str(e)
                 response = e.response.decoded
