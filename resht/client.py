@@ -170,11 +170,15 @@ class RestClient:
         else:
             raise ValueError('Invalid API service port: %s.' % port)
 
+    def head(self, path, params=None, **opts):
+        """
+        Perform a HEAD request with the provided query string parameters.
+        """
+        return self.request('GET', path, params, **opts)
+
     def get(self, path, params=None, **opts):
         """
-        Perform a GET request with the provided query string parameters. If the
-        base URL and/or path contain query string parameters they will all be
-        merged.
+        Perform a GET request with the provided query string parameters.
         """
         return self.request('GET', path, params, **opts)
 
@@ -225,6 +229,16 @@ class RestClient:
             basic_auth:str = None,
             pre_formatted_body:bool = False,
         ):
+        """
+        Perform an arbitrary HTTP request. If the base URL and/or path contain
+        query string parameters they will all be merged together. GET and HEAD
+        requests automatically treat all params as query params, but other
+        methods will encode them into the request body.
+
+        The request body is encoded as JSON by default, form data if if the
+        content type header is set to "application/x-www-form-urlencoded", or
+        unencoded if the content type header is set to something else.
+        """
         # normalize the API parameters
         if method is None or method == '':
             method = 'get'
@@ -238,7 +252,7 @@ class RestClient:
         elif isinstance(query, dict):
             query = self.build_query(query)
         # TODO: allow params to be in the request body (e.g. like ElasticSearch prefers)
-        if method == 'GET' and params:
+        if method in ['GET', 'HEAD'] and params:
             query = self.merge_query(self.build_query(params), query)
         url = self.build_url(path, query)
 
@@ -267,7 +281,7 @@ class RestClient:
             request_args['headers']['Authorization'] = auth_header
 
         # request body
-        if method == 'GET':
+        if method in ['GET', 'HEAD']:
             body = ''
         else:
             if pre_formatted_body:
@@ -417,7 +431,7 @@ class RestClient:
         if url.find('?') >= 0:
             url, existing_query = url.split('?', 1)
             query = cls.merge_query(existing_query, query)
-        return '?'.join((url, query)).rstrip('?')
+        return '?'.join((url, query.strip('?'))).rstrip('?')
 
     @classmethod
     def get_header(cls, headers: dict, header: str, value=None):

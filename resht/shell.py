@@ -46,6 +46,7 @@ class Shell:
     """
     # a list of our internal commands
     http_methods = (
+        'head',
         'get',
         'post',
         'put',
