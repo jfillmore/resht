@@ -5,6 +5,8 @@ from unittest.mock import (
     MagicMock,
     )
 import functools
+import json
+import io
 import re
 import unittest
 
@@ -20,7 +22,7 @@ class Headers:
 
     def get(self, key, default=None):
         key_lower = key.lower()
-        if key_lower in self.headers[key.lower()]:
+        if key_lower in self.headers:
             return self.headers[key_lower]
         return default
 
@@ -32,12 +34,12 @@ class MockResponse:
     def __init__(
             self,
             status_code:int = 200,
-            return_body:bytes = b'',
+            body:bytes = b'{}',
             content_type:str = 'application/json; charset=utf-8',
             headers:dict = None,
         ):
         self.status_code = status_code
-        self.return_body = return_body
+        self.body = body
         self.content_type = content_type
         self.headers = headers or {}
         self.mocks = None  # created for each 'with' block
@@ -52,10 +54,13 @@ class MockResponse:
             self.mocks[name] = patch.start()
         urlopen_rv = self.mocks['urlopen'].return_value
         urlopen_rv.status = self.status_code
-        urlopen_rv.body = MagicMock(return_value=self.return_body)
+        urlopen_rv.body = MagicMock(return_value=self.body)
         urlopen_rv.headers = Headers({
             'content-type': self.content_type,
         })
+        def read_body(*nargs, **kwargs):
+            return io.BytesIO(self.body).read(*nargs, **kwargs)
+        urlopen_rv.read = read_body
         return self
 
     @staticmethod
@@ -96,6 +101,10 @@ class MockResponse:
                 name, self._desc(val)
             )
 
+    @property
+    def last_req_data(self):
+        return self.get_call_arg('Request', 'data', 2)
+
     def __exit__(self, *nargs, **kwargs):
         for patch in self.patches.values():
             patch.stop()
@@ -135,13 +144,12 @@ class TestClient(unittest.TestCase, TestHelpers):
                 client.set_base_url(bad_url)
         for good_url in good_base_urls:
             client.set_base_url(good_url)
-            with MockResponse(200, b'ok') as mock_resp:
+            with MockResponse() as mock_resp:
                 client.get('/')
 
     def test_verbs(self):
         """
-        Checks all HTTP methods with no query string, extra headers, or
-        special bodies.
+        All HTTP methods with no query string, extra headers, or special bodies.
         """
         with MockResponse() as mock_resp:
             for calls, req_method in enumerate(self.req_methods()):
@@ -152,7 +160,7 @@ class TestClient(unittest.TestCase, TestHelpers):
 
     def test_paths(self):
         """
-        Tests lots of HTTP request paths for each HTTP method.
+        Lots of HTTP request paths for each HTTP method.
         """
         client = RestClient('example.com')
         paths = [
@@ -172,14 +180,14 @@ class TestClient(unittest.TestCase, TestHelpers):
 
     def test_query_string(self):
         """
-        Tests query string params show up for each HTTP method, whether passed
-        as a string, list of strings, or dict of key/value pairs.
+        Query string params show up for each HTTP method, whether passed as a
+        string, list of strings, or dict of key/value pairs.
         """
         paths = [
             '', '/', '/path', '//path', '/path/', '/path/path',
             '/path/path//path/',
         ]
-        query_pairs = {
+        query_lists = {
             '': ['?', '',],
             'foo=bar': ['?foo=bar', ['foo=bar'], {'foo': 'bar'}],
             'foo': ['?foo', 'foo'],
@@ -192,8 +200,8 @@ class TestClient(unittest.TestCase, TestHelpers):
         with MockResponse() as mock_resp:
             permutations = product(self.req_methods(), paths)
             for req_method, path in permutations:
-                for to_match, query_params in query_pairs.items():
-                    for query_param in query_params:
+                for to_match, query_list in query_lists.items():
+                    for query_param in query_list:
                         req_method(path, query=query_param)
                         url = mock_resp.get_call_arg('Request', 'url', 0)
                         if to_match:
@@ -209,8 +217,8 @@ class TestClient(unittest.TestCase, TestHelpers):
 
     def test_query_string_merge(self):
         """
-        Tests that having a base URL or request URL with query parameters
-        properly merge when params are also included with the request.
+        Having a base URL or request URL with query parameters properly merge
+        when params are also included with the request.
         """
         with MockResponse() as mock_resp:
             for req_method in self.req_methods():
@@ -234,20 +242,65 @@ class TestClient(unittest.TestCase, TestHelpers):
 
     def test_request_body(self):
         """
-        Tests that all body-friendly (e.g. all but HEAD... and GET for now)
-        HTTP methods accept a request body.
+        All body-friendly (e.g. all but HEAD... and GET for now) HTTP methods
+        accept a request body.
         """
         with MockResponse() as mock_resp:
             for req_method in self.req_methods(skip_methods=['head', 'get']):
                 req_method('/', params={'foo': 'bar'})
-                data = mock_resp.get_call_arg('Request', 'data', 2)
-                self.assertEqual(b'{"foo": "bar"}', data)
+                self.assertEqual(b'{"foo": "bar"}', mock_resp.last_req_data)
 
     def test_req_content_types(self):
-        pass
+        """
+        Various content types have the request body concoded properly for all
+        body-friendly HTTP methods, regardless of header name casing.
+        """
+        params = {'foo': 'bar'}
+        params_json = json.dumps(params).encode('utf-8')
+        params_form = 'foo=bar'
+        json_header_arg_list = [
+            None,
+            {'content-type': 'application/json'},
+            {'content-type': 'application/json; charset=utf-8'},
+        ]
+        # vary case on form data so we aren't testing default encoding behavior
+        form_header_arg_list = [
+            {'content-type': 'application/x-www-form-urlencoded'},
+            {'Content-Type': 'application/x-www-form-urlencoded'},
+        ]
+        with MockResponse() as mock_resp:
+            for req_method in self.req_methods(skip_methods=['head', 'get']):
+                # application/json types
+                for header_arg in json_header_arg_list:
+                    req_method('/', params=params, headers=header_arg)
+                    self.assertEqual(params_json, mock_resp.last_req_data)
+                # form data
+                for header_arg in form_header_arg_list:
+                    req_method( '/', params=params, headers=header_arg)
+                    self.assertEqual(params_form, mock_resp.last_req_data)
+
 
     def test_resp_content_types(self):
-        pass
+        """
+        Various response content types get decoded automatically, if
+        recognnized.
+        """
+        resp_data = b'{"foo": "bar"}'
+        resp_data_obj = json.loads(resp_data.decode('utf-8'))
+        bodies = {
+            'application/json': resp_data_obj,
+            'application/json; charset=utf-8': resp_data_obj,
+            'text/plain': resp_data,
+            'foo/bar': resp_data,
+        }
+        for content_type, to_match in bodies.items():
+            with MockResponse(body=resp_data, content_type=content_type) as mock_resp:
+                for req_method in self.req_methods(skip_methods=['head']):
+                    self.assertEqual(
+                        req_method('/', params=resp_data_obj),
+                        to_match,
+                        f'failed to decode "{content_type}" properly',
+                    )
 
     def test_basic_auth(self):
         pass

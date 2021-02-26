@@ -51,7 +51,6 @@ class RestClient:
     """
     Client for talking to a web server using RESTful methods.
     """
-
     def __init__(self, base_url:str = 'localhost', insecure:bool = False):
         # the base URL information for construction API requests
         self.base_url = None
@@ -64,6 +63,22 @@ class RestClient:
         if insecure:
             self.ssl_ctx.check_hostname = False
             self.ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    @staticmethod
+    def merge_headers(base_headers: dict, new_headers:dict = None):
+        """
+        Returns merged headers with all header names lower-cased to avoid
+        duplicates from mixed upper/lower casing.
+        """
+        merged = {
+            name.lower(): val
+            for name, val in base_headers.items()
+        }
+        if not new_headers:
+            return merged
+        for name, val in new_headers.items():
+            merged[name.lower()] = val
+        return merged
 
     def build_url(self, path:str, query:str = None) -> str:
         """
@@ -238,6 +253,9 @@ class RestClient:
         The request body is encoded as JSON by default, form data if if the
         content type header is set to "application/x-www-form-urlencoded", or
         unencoded if the content type header is set to something else.
+
+        Returns the decoded response body, or a Response object if "full" is
+        requested.
         """
         # normalize the API parameters
         if method is None or method == '':
@@ -254,23 +272,25 @@ class RestClient:
         # TODO: allow params to be in the request body (e.g. like ElasticSearch prefers)
         if method in ['GET', 'HEAD'] and params:
             query = self.merge_query(self.build_query(params), query)
-        url = self.build_url(path, query)
 
+        url = self.build_url(path, query)
         request_args = {
-            'headers': {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            }
+            # to ensure we're always normalized we never set 'em directly
+            'headers': self.merge_headers({
+                'content-Type': 'application/json',
+                'accept': 'application/json',
+            }),
         }
 
         # request headers (misc, cookies, auth, etc)
-        if headers:
-            request_args['headers'].update(headers)
         cookies = []
         for name in self.cookies:
             cookies.append('='.join([name, self.cookies[name]]))
         if cookies:
-            request_args['headers']['Cookie'] = '&'.join(cookies)
+            request_args['headers'] = self.merge_headers(
+                request_args['headers'],
+                {'cookie': '&'.join(cookies)}
+            )
         if basic_auth or self.basic_auth:
             if not basic_auth:
                 basic_auth = ':'.join([
@@ -278,18 +298,31 @@ class RestClient:
                     self.basic_auth['password'],
                 ])
             auth_header ='Basic ' + base64.b64encode(basic_auth)
-            request_args['headers']['Authorization'] = auth_header
+            request_args['headers'] = self.merge_headers(
+                request_args['headers'],
+                {'authorization': auth_header},
+            )
+        if headers:
+            # always ensure passed headers override anything we did
+            request_args['headers'] = self.merge_headers(
+                request_args['headers'],
+                headers,
+            )
 
-        # request body
+        # request body, automatically encoding if needed
         if method in ['GET', 'HEAD']:
             body = ''
         else:
             if pre_formatted_body:
                 body = params
             else:
-                if self.get_header(request_args['headers'], 'Content-Type', 'application/json'):
+                req_content_type = self.get_header(
+                    request_args['headers'],
+                    'content-type',
+                )
+                if req_content_type.startswith('application/json'):
                     body = json.dumps(params).encode('utf-8')
-                elif self.get_header(request_args['headers'], 'Content-Type', 'application/x-www-form-urlencoded'):
+                elif req_content_type == 'application/x-www-form-urlencoded':
                     body = urllib.parse.urlencode(params)
                 else:
                     # assume its already been encoded
@@ -314,21 +347,6 @@ class RestClient:
             response = urllib.request.urlopen(request, context=self.ssl_ctx)
         except urllib.request.HTTPError as error_resp:
             response = error_resp
-
-        # if we know the type of charset, perform the decoding automatically
-        content_type = response.headers.get('Content-Type')
-        response_data = response.read()
-        if response_data and content_type and ';' in content_type:
-            charset = content_type.split(';')[1].strip()
-            if '=' in charset:
-                response_data = response_data.decode(charset.split('=')[1])
-
-        # see if we get a cookie back; note that we ignore the path
-        for hdr_name, hdr_value in response.headers.items():
-            if hdr_name.lower() == 'set-cookie':
-                cookies = http.cookies.BaseCookie(hdr_value)
-                for name in cookies:
-                    self.cookies[name] = cookies[name].value
         if verbose:
             dbg.log('Response Status: ', data=response.status, data_inline=True)
             dbg.log('Response Headers:', data={
@@ -336,14 +354,32 @@ class RestClient:
                     for name, val in response.headers.items()
                 }
             )
-        if not content_type or not content_type.startswith("application/json"):
-            decoded = response_data
-        else:
+
+        # track any cookies we get back; ignore the path as a temp hack :/
+        for hdr_name, hdr_value in response.headers.items():
+            if hdr_name.lower() == 'set-cookie':
+                cookies = http.cookies.BaseCookie(hdr_value)
+                for name in cookies:
+                    self.cookies[name] = cookies[name].value
+
+        # automatically decode the response body based on content-type
+        # if we know the type of charset, perform the decoding automatically
+        resp_content_type = response.headers.get('Content-Type')
+        resp_data = response.read()
+        if resp_data and resp_content_type and ';' in resp_content_type:
+            charset = resp_content_type.split(';')[1].strip()
+            if '=' in charset:
+                resp_data = resp_data.decode(charset.split('=')[1])
+        if resp_content_type and resp_content_type.startswith('application/json'):
             try:
-                decoded = json.loads(response_data)
+                decoded = json.loads(resp_data)
             except:
-                raise ValueError('Failed to decode API response\n' + response_data)
-        response = Response(obj=response, decoded=decoded, data=response_data)
+                raise ValueError('Failed to decode API response\n' + str(resp_data)[:128])
+        else:
+            decoded = resp_data
+
+        # handle any HTTP response errors
+        response = Response(obj=response, decoded=decoded, data=resp_data)
         if response.obj.status < 200 or response.obj.status >= 400:
             error_cls = HttpError
             if response.obj.status >= 500:
@@ -356,9 +392,8 @@ class RestClient:
                 ),
                 response,
             )
-        if full:
-            return response
-        return decoded
+
+        return response if full else decoded
 
     @classmethod
     def build_query_obj(cls, query, keep_blanks=True):
@@ -434,15 +469,12 @@ class RestClient:
         return '?'.join((url, query.strip('?'))).rstrip('?')
 
     @classmethod
-    def get_header(cls, headers: dict, header: str, value=None):
+    def get_header(cls, headers: dict, header: str):
         """
         Read a header from the given list (ignoring case) and return the value.
         Returns None if not found, or optionally the value given.
         """
         for key in headers:
             if key.lower() == header.lower():
-                if value is None:
-                    return headers[key]
-                else:
-                    return headers[key] == value
+                return headers[key]
         return None
