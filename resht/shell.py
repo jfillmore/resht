@@ -472,7 +472,7 @@ EXAMPLES:
                 answer = self.client.request(
                     method=args['verb'],
                     path=args['path'],
-                    params=args['api_args'],
+                    body=args['api_args'],
                     query=args['query'],
                     headers=args['headers'],
                     verbose=args['verbose'],

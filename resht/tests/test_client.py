@@ -3,7 +3,8 @@ from itertools import product
 from unittest.mock import (
     patch,
     MagicMock,
-    )
+)
+import base64
 import functools
 import json
 import io
@@ -101,8 +102,15 @@ class MockResponse:
                 name, self._desc(val)
             )
 
-    @property
-    def last_req_data(self):
+    def get_last_req_header(self, name, default=None):
+        """
+        Returns a header (default: None) from the last HTTP request.
+        """
+        headers = self.get_call_arg('Request', 'headers', 2)
+        # we always normalize headers to lowercase for simplicity
+        return headers.get(name.lower(), default)
+
+    def get_last_req_data(self):
         return self.get_call_arg('Request', 'data', 2)
 
     def __exit__(self, *nargs, **kwargs):
@@ -113,9 +121,9 @@ class MockResponse:
 
 class TestHelpers:
     @staticmethod
-    def req_methods(base_url='example.com', skip_methods=None):
-        client = RestClient(base_url)
-        http_verbs = ['get', 'post', 'put', 'patch', 'delete']
+    def req_methods(skip_methods=None, **client_args):
+        client = RestClient(**client_args)
+        http_verbs = ['head', 'get', 'post', 'put', 'patch', 'delete']
         for http_verb in http_verbs:
             if skip_methods and http_verb in skip_methods:
                 continue
@@ -227,13 +235,13 @@ class TestClient(unittest.TestCase, TestHelpers):
                 url_path, url_query = url.split('?')
                 url_query_parts = set(url_query.split('&'))
                 self.assertEqual({'foo=bar', 'food=barn'}, url_query_parts)
-            for req_method in self.req_methods('example.com/?foo=bar'):
+            for req_method in self.req_methods(base_url='example.com/?foo=bar'):
                 req_method('/?food=barn')
                 url = mock_resp.get_call_arg('Request', 'url', 0)
                 url_path, url_query = url.split('?')
                 url_query_parts = set(url_query.split('&'))
                 self.assertEqual({'foo=bar', 'food=barn'}, url_query_parts)
-            for req_method in self.req_methods('example.com/?foo=bar'):
+            for req_method in self.req_methods(base_url='example.com/?foo=bar'):
                 req_method('/?food=barn', query='fool=bard')
                 url = mock_resp.get_call_arg('Request', 'url', 0)
                 url_path, url_query = url.split('?')
@@ -247,17 +255,17 @@ class TestClient(unittest.TestCase, TestHelpers):
         """
         with MockResponse() as mock_resp:
             for req_method in self.req_methods(skip_methods=['head', 'get']):
-                req_method('/', params={'foo': 'bar'})
-                self.assertEqual(b'{"foo": "bar"}', mock_resp.last_req_data)
+                req_method('/', body={'foo': 'bar'})
+                self.assertEqual(b'{"foo": "bar"}', mock_resp.get_last_req_data())
 
     def test_req_content_types(self):
         """
         Various content types have the request body concoded properly for all
         body-friendly HTTP methods, regardless of header name casing.
         """
-        params = {'foo': 'bar'}
-        params_json = json.dumps(params).encode('utf-8')
-        params_form = 'foo=bar'
+        body = {'foo': 'bar'}
+        body_json = json.dumps(body).encode('utf-8')
+        body_form = 'foo=bar'
         json_header_arg_list = [
             None,
             {'content-type': 'application/json'},
@@ -272,13 +280,12 @@ class TestClient(unittest.TestCase, TestHelpers):
             for req_method in self.req_methods(skip_methods=['head', 'get']):
                 # application/json types
                 for header_arg in json_header_arg_list:
-                    req_method('/', params=params, headers=header_arg)
-                    self.assertEqual(params_json, mock_resp.last_req_data)
+                    req_method('/', body=body, headers=header_arg)
+                    self.assertEqual(body_json, mock_resp.get_last_req_data())
                 # form data
                 for header_arg in form_header_arg_list:
-                    req_method( '/', params=params, headers=header_arg)
-                    self.assertEqual(params_form, mock_resp.last_req_data)
-
+                    req_method( '/', body=body, headers=header_arg)
+                    self.assertEqual(body_form, mock_resp.get_last_req_data())
 
     def test_resp_content_types(self):
         """
@@ -297,16 +304,65 @@ class TestClient(unittest.TestCase, TestHelpers):
             with MockResponse(body=resp_data, content_type=content_type) as mock_resp:
                 for req_method in self.req_methods(skip_methods=['head']):
                     self.assertEqual(
-                        req_method('/', params=resp_data_obj),
+                        req_method('/', body=resp_data_obj),
                         to_match,
                         f'failed to decode "{content_type}" properly',
                     )
 
     def test_basic_auth(self):
-        pass
+        """
+        Basic HTTP authentication has proper base64 encoding. Auth passed while
+        making a request overrides any default auth we explicitly set.
+        """
+        def auth_header(basic_auth):
+            return 'Basic ' + \
+                base64.b64encode(basic_auth.encode('utf-8')).decode('ascii')
+
+        auth_base = 'foo:bar'
+        auth_override = 'food:bard'
+        auth_header_base = auth_header(auth_base)
+        auth_header_override = auth_header(auth_override)
+        with MockResponse() as mock_resp:
+            for req_method in self.req_methods(basic_auth=auth_base):
+                req_method('/')
+                self.assertEqual(
+                    mock_resp.get_last_req_header('authorization'),
+                    auth_header_base,
+                    'failed using the client auth given on requests by default',
+                )
+                req_method('/', basic_auth=auth_override)
+                self.assertEqual(
+                    mock_resp.get_last_req_header('authorization'),
+                    auth_header_override,
+                    'failed passing in auth for a specific request overrides',
+                )
+                req_method('/', headers={
+                    'Authorization': auth_header_override
+                })
+                self.assertEqual(
+                    mock_resp.get_last_req_header('authorization'),
+                    auth_header_override,
+                    'failed passing in a custom auth header overrides',
+                )
 
     def test_headers(self):
-        pass
+        """
+        Headers passed to requests are case-insensitive.
+        """
+        headers_list = [
+            {'X-Foo': 'bar'},
+            {'x-foo': 'bar'},
+        ]
+        with MockResponse() as mock_resp:
+            for headers in headers_list:
+                for req_method in self.req_methods():
+                    req_method('/', headers=headers)
+                    for name, val in headers.items():
+                        self.assertEqual(
+                            mock_resp.get_last_req_header(name.upper()),
+                            val,
+                            'failed to find header reguardless of case',
+                        )
 
     #def test_files(self):
     #    pass

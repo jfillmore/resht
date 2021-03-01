@@ -51,7 +51,10 @@ class RestClient:
     """
     Client for talking to a web server using RESTful methods.
     """
-    def __init__(self, base_url:str = 'localhost', insecure:bool = False):
+    def __init__(
+            self, base_url:str = 'localhost', insecure:bool = False,
+            basic_auth:str = None
+        ):
         # the base URL information for construction API requests
         self.base_url = None
         self.cookies = {}  # session cookie cache
@@ -63,6 +66,8 @@ class RestClient:
         if insecure:
             self.ssl_ctx.check_hostname = False
             self.ssl_ctx.verify_mode = ssl.CERT_NONE
+        if basic_auth:
+            self.set_basic_auth(basic_auth)
 
     @staticmethod
     def merge_headers(base_headers: dict, new_headers:dict = None):
@@ -169,11 +174,8 @@ class RestClient:
             else:
                 self.set_port(80)
 
-    def load_basic_auth(self, username=None, password=None):
-        if username is not None and password is not None:
-            self.basic_auth = {'username': username, 'password': password}
-        else:
-            self.basic_auth = None
+    def set_basic_auth(self, basic_auth:str):
+        self.basic_auth = basic_auth
 
     def set_port(self, port):
         """
@@ -185,59 +187,59 @@ class RestClient:
         else:
             raise ValueError('Invalid API service port: %s.' % port)
 
-    def head(self, path, params=None, **opts):
+    def head(self, *req_args, **req_kwargs):
         """
         Perform a HEAD request with the provided query string parameters.
         """
-        return self.request('GET', path, params, **opts)
+        return self.request('GET', *req_args, **req_kwargs)
 
-    def get(self, path, params=None, **opts):
+    def get(self, *req_args, **req_kwargs):
         """
         Perform a GET request with the provided query string parameters.
         """
-        return self.request('GET', path, params, **opts)
+        return self.request('GET', *req_args, **req_kwargs)
 
-    def post(self, path, params=None, **opts):
+    def post(self, *req_args, **req_kwargs):
         """
         Perform a POST request with the supplied parameters as the payload.
         Defaults to JSON encoding.
         """
-        return self.request('POST', path, params, **opts)
+        return self.request('POST', *req_args, **req_kwargs)
 
-    def patch(self, path, params=None, **opts):
+    def patch(self, *req_args, **req_kwargs):
         """
         Perform a PATCH request with the supplied parameters as the payload.
         Defaults to JSON encoding.
         """
-        return self.request('PATCH', path, params, **opts)
+        return self.request('PATCH', *req_args, **req_kwargs)
 
-    def put(self, path, params=None, **opts):
+    def put(self, *req_args, **req_kwargs):
         """
         Perform a PUT request with the supplied parameters as the payload.
         Defaults to JSON encoding.
         """
-        return self.request('PUT', path, params, **opts)
+        return self.request('PUT', *req_args, **req_kwargs)
 
-    def options(self, path, params=None, **opts):
+    def options(self, *req_args, **req_kwargs):
         """
         Perform a OPTIONS request with the supplied parameters as the payload.
         Defaults to JSON encoding.
         """
-        return self.request('OPTIONS', path, params, **opts)
+        return self.request('OPTIONS', *req_args, **req_kwargs)
 
-    def delete(self, path, params=None, **opts):
+    def delete(self, *req_args, **req_kwargs):
         """
         Perform a DELETE request with the supplied parameters as the payload.
         Defaults to JSON encoding.
         """
-        return self.request('DELETE', path, params, **opts)
+        return self.request('DELETE', *req_args, **req_kwargs)
 
     def request(
             self,
             method:str,
             path:str,
-            params:dict = None,
-            query:Union[str,list,dict] = None,
+            body:Union[dict,str] = None,
+            query:Union[dict,list,str] = None,
             headers:dict = None,
             verbose:bool = False,
             full:bool = False,
@@ -247,7 +249,7 @@ class RestClient:
         """
         Perform an arbitrary HTTP request. If the base URL and/or path contain
         query string parameters they will all be merged together. GET and HEAD
-        requests automatically treat all params as query params, but other
+        requests automatically treat any body params as query params, but other
         methods will encode them into the request body.
 
         The request body is encoded as JSON by default, form data if if the
@@ -263,15 +265,15 @@ class RestClient:
         method = method.upper()
         if path == '' or path is None:
             path = '/'
-        if params is None:
-            params = {}
+        if body is None:
+            body = {}
         if isinstance(query, list):
             query = '&'.join(query)
         elif isinstance(query, dict):
             query = self.build_query(query)
         # TODO: allow params to be in the request body (e.g. like ElasticSearch prefers)
-        if method in ['GET', 'HEAD'] and params:
-            query = self.merge_query(self.build_query(params), query)
+        if method in ['GET', 'HEAD'] and body:
+            query = self.merge_query(self.build_query(body), query)
 
         url = self.build_url(path, query)
         request_args = {
@@ -293,11 +295,9 @@ class RestClient:
             )
         if basic_auth or self.basic_auth:
             if not basic_auth:
-                basic_auth = ':'.join([
-                    self.basic_auth['username'],
-                    self.basic_auth['password'],
-                ])
-            auth_header ='Basic ' + base64.b64encode(basic_auth)
+                basic_auth = self.basic_auth
+            auth_header = 'Basic ' + \
+                base64.b64encode(basic_auth.encode('utf-8')).decode('ascii')
             request_args['headers'] = self.merge_headers(
                 request_args['headers'],
                 {'authorization': auth_header},
@@ -311,23 +311,23 @@ class RestClient:
 
         # request body, automatically encoding if needed
         if method in ['GET', 'HEAD']:
-            body = ''
+            req_body = ''
         else:
             if pre_formatted_body:
-                body = params
+                req_body = body
             else:
                 req_content_type = self.get_header(
                     request_args['headers'],
                     'content-type',
                 )
                 if req_content_type.startswith('application/json'):
-                    body = json.dumps(params).encode('utf-8')
+                    req_body = json.dumps(body).encode('utf-8')
                 elif req_content_type == 'application/x-www-form-urlencoded':
-                    body = urllib.parse.urlencode(params)
+                    req_body = urllib.parse.urlencode(body)
                 else:
                     # assume its already been encoded
-                    body = params
-            request_args['data'] = body
+                    req_body = body
+            request_args['data'] = req_body
 
         # fire away!
         if verbose:
@@ -336,8 +336,8 @@ class RestClient:
                 data=' %s %s' % (method.upper(), url),
                 data_inline=True
             )
-            if body:
-                dbg.log('Request Body: ', data=body, data_inline=True)
+            if req_body:
+                dbg.log('Request Body: ', data=req_body, data_inline=True)
             if request_args['headers']:
                 dbg.log('Request Headers:', data=request_args['headers'])
             if self.cookies:
