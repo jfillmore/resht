@@ -12,6 +12,7 @@ import json
 import re
 import sys
 
+
 def usage():
     sys.stdout.write("""usage: jsonx [ARGS] [JSON_FILE]
 

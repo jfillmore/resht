@@ -15,6 +15,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import typing
 
 # import hacks!
 os.environ['TERM'] = 'linux'
@@ -23,7 +24,9 @@ import readline
 from . import jsonx
 from . import client
 from . import dbg
-from . import util
+from . import types
+from . import usage
+from . import utils
 
 
 xml_content_types = [
@@ -58,7 +61,7 @@ class Shell:
         'del': 'delete',
         'opts': 'options',
         'opt': 'options',
-        '?': 'options'
+        '?': 'help'
     }
     cmds = {
         'set': {},
@@ -101,12 +104,16 @@ class Shell:
         if self.args['help']:
             return
         # run our initial command, possibly invoking shell mode after
-        self.parse_cmd(argv)
         if self.args['shell']:
-            self.start()
+            self.start(cmd=argv)
+        else:
+            self.parse_cmd(argv, print_meta=self.args['verbose'])
 
-    def start(self, read_history=True):
-        # load our history
+    def start(
+            self,
+            cmd = None,
+            read_history:bool = True,
+        ):
         if read_history:
             try:
                 readline.read_history_file(self.env('histfile'))
@@ -114,23 +121,28 @@ class Shell:
                 pass
         # run APIs until the cows come home
         try:
-            repeat = False
-            while self.parse_cmd(raw_input(self.get_prompt())):
-                pass
+            # run a command by default to start if needed
+            if cmd:
+                last_resp = self.parse_cmd(cmd, print_meta=True)
+            restart = False
+            while True:
+                last_resp = self.parse_cmd(
+                    input(self.get_prompt()),
+                    print_meta=True,
+                )
         except KeyboardInterrupt as e:
             pass
         except EOFError as e:
             pass
         except ValueError as e:
-            dbg.log('Input error: ' + str(e) + '\n', symbol='!')
-            repeat = True
+            dbg.log('Input error: ' + str(e) + '\n', symbol='!', color='0;31')
+            restart = True
         except Exception as e:
-            dbg.log(str(e) + '\n', symbol='!')
-            repeat = True
-        if repeat:
-            self.start(False)
+            print_exception(*sys.exc_info())
+            dbg.log(str(e) + '\n', symbol='!', color='0;31')
+        if restart:
+            self.start(read_history=False, last_resp_meta=last_resp_meta)
         else:
-            dbg.log('\n')
             self.stop()
             return self.last_rv
 
@@ -138,28 +150,36 @@ class Shell:
         # save our history
         readline.write_history_file(self.env('histfile'))
 
-    def get_prompt(self):
-        # : using colors messes up term spacing w/ readline history support
-        # http://bugs.python.org/issue12972
-        # likely fixed in 3.2+? -- 2.7.5 seems buggy still
-        if self.args['color'] and sys.version_info >= (3, 2):
-            prompt = ''.join([
-                '\033[0;31m',
-                '[',
-                '\033[1;31m',
-                self.env('cwd'),
-                '\033[0;31m',
-                '] ',
-                '\033[0;37m',
-                '> ',
-                '\033[0;0m'
-            ])
-        else:
-            prompt = ' '.join([
-                self.env('cwd'),
-                '> '
-            ])
-        return prompt
+    def get_prompt(self, last_resp_meta=None):
+        # TODO:
+        # - show current settings (e.g. verbose)
+        # - show default headers
+        # - show default vars/etc
+        #
+        # e.g.
+        # [+ {status_code}] / counters
+        # [! {type}] / counters
+        # [env: 0
+        # [http://localhost:8123/ - /foo/bar] >
+        #
+        lines = []
+
+        if last_resp_meta:
+            self._print_response_meta(last_resp_meta)
+        lines.append(''.join([
+            '\033[0;35m',
+            '[',
+            '\033[1;35m',
+            str(self.client.base_url),
+            ' - ',
+            self.env('cwd'),
+            '\033[0;35m',
+            '] ',
+            '\033[1;37m',
+            '> ',
+            '\033[0;0m'
+        ]))
+        return '\n'.join(lines)
 
     def set_edit_mode(self, mode):
         # TODO: figure out why 'vi' doesn't let you use the 'm' key :/
@@ -171,93 +191,7 @@ class Shell:
             raise Exception(''.join(['Invalid editing mode: ', mode, ' Supported modes are: ', ', '.join(modes), '.']))
 
     def print_help(self, shell=False):
-        usage = """
-USAGE: resht HTTP-VERB|COMMAND API_PATH [API_PARAMS] [ARGUMENTS]
-
-ARGUMENTS
----------------------------------------------------------------------------
-
-HTTP OPTIONS (each may be specified multiple times)
-   -f, --form               Override default of sending JSON data
-   -H, --header HEADER      HTTP header (e.g. 'Foo: bar') .
-   -Q, --query QUERY_DATA   Query data to include (e.g. foo=bar&food=yummy).
-   -d, --data NAME[+]=PATH  Store response data; '+' also adds variable to the env
-
-
-OTHER OPTIONS (may also be set via 'set' command)
-   -B, --basic USER:PASS    HTTP basic authentication.
-   -c, --color              Color formatted JSON responses (default=True).
-   -C, --no-color           Do not color formatted JSON responses.
-   -h, --help               This information.
-   -I, --invert             Invert colors in formatted JSON responses.
-       --insecure           Do not valid SSL certificates (danger!)
-   -j, --json STRING        Append JSON-encoded list to API parameters.
-   -q, --quiet              Do not print API return response.
-   -r, --raw                Don't format response data; return raw response.
-   -s, --shell              Shell mode for running multiple APIs within a session.
-   -u, --url URL            URL to the API location (default: https://localhost/).
-   -v, --verbose            Print verbose debugging info to stderr.
-   -x, --extract PATH       Parse JSON/(X)HTML to only return requested data; may be repeated.
-   -X, --exclude PATH       Exclude specified path from JSON data; may be repeated.
-
-API PARAMS
----------------------------------------------------------------------------
-Dictionaries can be created on demand using dot notation. Multiple params within the same dictionary will merge together. Values are always encoded as strings unless ":=" is used to assign the value.
-
-   foo                      {"foo": true}
-   ^foo                     {"foo": false}
-   foo=bar                  {"foo": "bar"}
-   foo.bar=3 foo.bard=abc   {"foo": {"bar": "3", "bard": "abc"}}
-   foo:='{"bar":3}'         {"foo": {"bar": 3}}
-   foo.bar:=3.14            {"foo": {"bar": 3.14}}
-
-Variables in memory (e.g. shown by 'data' command) may be referenced using "+=" as the operator.
-
-
-HTML/XML PATHS (--extract, --data)
----------------------------------------------------------------------------
-Values are extracted using 'pgquery', a Python port of jQuery. This can be used to extract and store values from input forms.
-
-
-JSON PATHS  (--extract, --exclude, --data)
----------------------------------------------------------------------------
-The JSON data can be filtered based on index, key matches, ranges, etc.
-
-    Arrays:
-        By Index:
-         - 'foo/0', 'foo/2', 'foo/-1' (last item)
-        By Range:
-         - 'foo/:' or 'foo/*' (all items within the array),
-         - 'foo/2:', 'foo/:2', 'foo/1:5', 'foo/-2:' (last 2),
-         - 'foo/:-2' (all but last two),
-         - 'foo/1:-3' (between first and up until 3rd to last)
-    Dictionaries:
-        Regular Expressions:
-         - 'foo/b..?r' = foo/bar, foo/beer
-         - 'foo/bar/.*[pP]assw(or)?d' == anything within foo/bar that looks like a password
-
-SHELL COMMANDS
----------------------------------------------------------------------------
-   cd                       Change the base URL (e.g. "cd customers/8; cd ../9").
-   help                     This information.
-   quit                     Adios! (quit shell).
-   set                      Set configuration options.
-   config                   List current configuration infomation.
-   sh CMD                   Run a BASH shell command.
-   data [NAME] [-=NAME]     List variables in memory, optionally by name; -= to remove from memory
-   env [NAME] [[+-]=NAME]   List environmental variables, optionally by name; += or -= to add/remove 'data' from the environment
-   > FILE                   Write API response to specified file.
-   >> FILE                  Append API response to specified file.
-
-EXAMPLES:
----------------------------------------------------------------------------
-    rest-cli -u https://foo.com/api -s
-    > get site/foo.com -v
-    > post site -j domain=foo.com
-    > cd site/foo.com
-    > get ./
-        """
-        dbg.log(usage.strip(), no_color=True, symbol='')
+        dbg.log(usage.hints.shell, no_color=True, symbol='')
 
     def parse_args(self, expr, arg_slice=None):
         args = {
@@ -384,11 +318,11 @@ EXAMPLES:
                     else:
                         raise JSONException("JSON values must be a dictionary of arguments.")
                 except JSONException as e:
-                    dbg.log('Invalid JSON:' + e.message)
+                    dbg.log(f'Invalid JSON: {e}')
                     raise e
                 except Exception as e:
-                    dbg.log('Invalid JSON:' + e.message)
-                    raise JSONException(e.message)
+                    dbg.log(f'Invalid JSON: {e}')
+                    raise JSONException(e)
             elif part == '-r' or part == '--raw':
                 args['formatted'] = False
             elif part == '--url' or part == '-u':
@@ -423,7 +357,7 @@ EXAMPLES:
                         args['verb'] = self.method_aliases[args['verb']]
                 elif args['verb'] in self.http_methods and args['path'] is None:
                     # collect the API -- unless this is a internal command
-                    args['path'] = util.pretty_path(self.parse_path(part), False, False)
+                    args['path'] = utils.pretty_path(self.parse_path(part), False, False)
                 else:
                     # anything else is a parameter
                     if args['verb'] in self.http_methods:
@@ -433,10 +367,10 @@ EXAMPLES:
                         args['cmd_args'].append(part)
             i += 1
         if arg_slice is not None:
-            args = util.get_args(arg_slice, args)
+            args = utils.get_args(arg_slice, args)
         return args
 
-    def parse_cmd(self, cli_cmd):
+    def parse_cmd(self, cli_cmd, print_meta: bool = False) -> typing.Union[types.Response, bool]:
         """
         Parse a shell command to either run an internal command or perform an
         HTTP request. Returns True if a command was successfully parsed, false
@@ -471,7 +405,7 @@ EXAMPLES:
                 args['api_args'].update(self.env('vars'))
                 answer = self.client.request(
                     method=args['verb'],
-                    path=args['path'],
+                    path=self.parse_path(args['path']),
                     body=args['api_args'],
                     query=args['query'],
                     headers=args['headers'],
@@ -483,6 +417,7 @@ EXAMPLES:
                 response_status = None
                 success = True
             except client.HttpError as e:
+                # TODO: remove?
                 success = False
                 response_status = str(e)
                 response = e.response.decoded
@@ -499,15 +434,16 @@ EXAMPLES:
                     file = open(args['stdout_redir'], args['redir_type'])
                 except IOError as e:
                     dbg.log('Failed to write response: ' + e + '\n', symbol='!')
-                    return True
+                    return answer
         else:
             # run an internal command
             try:
                 return self.run_cmd(args['verb'], args['cmd_args'])
             except Exception as e:
                 response_status = 'Syntax Error'
-                response = e.message
+                response = str(e)
                 success = False
+                answer = None
                 if args['verbose']:
                     print_exception(*sys.exc_info())
         # adjust the response object as requested
@@ -554,9 +490,30 @@ EXAMPLES:
             redir_type=args['redir_type'],
             file=file
         )
-        return True
+        if print_meta and not isinstance(answer, bool):
+            self._print_response_meta(answer.meta)
+        return answer
+
+    def _print_response_meta(self, resp_meta: types.ResponseMeta):
+        if resp_meta.success:
+            code_color = '\033[0;30;42m'
+            msg_color = '\033[4;32;40m'
+        else:
+            code_color = '\033[0;30;41m'
+            msg_color = '\033[4;31;40m'
+        sys.stderr.write(''.join([
+            code_color,
+            ' ' + str(resp_meta.code) + ' ',
+            msg_color,
+            ' ',
+            resp_meta.duration.desc,
+            ' / ',
+            str(resp_meta.byte_size),
+            '\033[0m',
+        ]) + '\n')
 
     def _print_response(self, success, response, status=None, **args):
+        # TODO: add stail and response footer info (success, size, speed)
         if success:
             if response is not None:
                 if 'stdout_redir' in args and args['stdout_redir'] is not None:
@@ -604,9 +561,9 @@ EXAMPLES:
                         response[0:chars_to_print]
                     ), symbol='!')
                 else:
-                    dbg.log('%s:\n%s' % (
+                    dbg.log('%s:\n\033[0m%s' % (
                         status, response
-                    ), symbol='!')
+                    ), symbol='!', color='1;31')
             else:
                 dbg.log('%s:' % (status), symbol='!', color='31')
                 if response is not None:
@@ -694,10 +651,12 @@ EXAMPLES:
         based on our current path.
         """
         # no path? go to our last working dir
-        if not len(path) or path == '-':
+        if path == '-':
             return self._env['last_cwd']
+        if not path:
+            return self.env('cwd')
         # make sure the path is formatted pretty
-        path = util.pretty_path(path, False, False)
+        path = utils.pretty_path(path, False, False)
         # parse the dir path for relative portions
         trailing = path.endswith('/')
         if path.startswith('/'):
@@ -705,24 +664,24 @@ EXAMPLES:
         else:
             cur_dirs = self.env('cwd').split('/')
         dirs = path.split('/')
-        for dir in dirs:
-            if dir == '' or dir == '.':
+        for name in dirs:
+            if name == '' or name == '.':
                 # blanks can creep in on absolute paths, no worries
                 continue
             rel_depth = 0
-            if dir == '..':
+            if name == '..':
                 if not len(cur_dirs):
                     raise Exception("URI is out of bounds: \"%s\"." % (path))
                 cur_dirs.pop()
             else:
-                cur_dirs.append(dir)
+                cur_dirs.append(name)
         # always end up with an absolute path
-        final_path = util.pretty_path('/'.join(cur_dirs), True, False)
-        if trailing:
+        final_path = utils.pretty_path('/'.join(cur_dirs), True, False)
+        if trailing and not final_path.endswith('/'):
             final_path = final_path + '/'
         return final_path
 
-    def run_cmd(self, cmd, params=None):
+    def run_cmd(self, cmd, params=None) -> types.Response:
         """
         Run a command using the specified parameters.
         """
@@ -803,10 +762,11 @@ EXAMPLES:
             dbg.pp(self.args)
             sys.stdout.write('\n')
         elif cmd == 'quit':
-            return False
+            return Response(success=False)
         elif cmd == 'help':
             self.print_help()
         elif cmd == 'sh':
+            # TODO: format better
             proc = subprocess.Popen(params)
         else:
             raise Exception('Unrecognized command: "%s". Enter "help" for help.' % (cmd))

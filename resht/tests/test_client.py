@@ -14,6 +14,8 @@ import unittest
 from resht.client import RestClient
 
 
+HTTP_VERBS = ['head', 'get', 'post', 'put', 'patch', 'delete']
+
 class Headers:
     def __init__(self, headers: dict = None):
         self.headers = {}
@@ -102,6 +104,12 @@ class MockResponse:
                 name, self._desc(val)
             )
 
+    def get_last_req_method(self):
+        """
+        Return the last HTTP request method called, in uppercase.
+        """
+        return self.get_call_arg('Request', 'method', 5).upper()
+
     def get_last_req_header(self, name, default=None):
         """
         Returns a header (default: None) from the last HTTP request.
@@ -123,8 +131,7 @@ class TestHelpers:
     @staticmethod
     def req_methods(skip_methods=None, **client_args):
         client = RestClient(**client_args)
-        http_verbs = ['head', 'get', 'post', 'put', 'patch', 'delete']
-        for http_verb in http_verbs:
+        for http_verb in HTTP_VERBS:
             if skip_methods and http_verb in skip_methods:
                 continue
             yield getattr(client, http_verb)
@@ -159,12 +166,14 @@ class TestClient(unittest.TestCase, TestHelpers):
         """
         All HTTP methods with no query string, extra headers, or special bodies.
         """
+        client = RestClient()
         with MockResponse() as mock_resp:
-            for calls, req_method in enumerate(self.req_methods()):
-                req_method('/')
+            for i, http_verb in enumerate(HTTP_VERBS):
+                getattr(client, http_verb)('/')
                 # +1 for the call we just did
-                self.assertEqual(calls + 1, mock_resp.mocks['urlopen'].call_count)
-                self.assertEqual(calls + 1, mock_resp.mocks['Request'].call_count)
+                self.assertEqual(i + 1, mock_resp.mocks['urlopen'].call_count)
+                self.assertEqual(i + 1, mock_resp.mocks['Request'].call_count)
+                self.assertEqual(mock_resp.get_last_req_method(), http_verb.upper())
 
     def test_paths(self):
         """

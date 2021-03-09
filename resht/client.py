@@ -6,7 +6,7 @@ Client for talking to a webserver.
 # - JSON body for GET requests
 
 from collections import namedtuple
-from typing import Union
+from typing import Union, NamedTuple
 import base64
 import http.cookies
 import json
@@ -16,12 +16,20 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.response
 
 from . import dbg
-from . import util
+from . import utils
+from .types import (
+    Url,
+    Response,
+    ResponseMeta,
+)
+from .utils import (
+    get_duration,
+    get_byte_size,
+)
 
-
-Response = namedtuple('Response', ['obj', 'decoded', 'data'])
 
 
 class HttpError(Exception):
@@ -67,7 +75,7 @@ class RestClient:
             self.ssl_ctx.check_hostname = False
             self.ssl_ctx.verify_mode = ssl.CERT_NONE
         if basic_auth:
-            self.set_basic_auth(basic_auth)
+            self.basic_auth = basic_auth
 
     @staticmethod
     def merge_headers(base_headers: dict, new_headers:dict = None):
@@ -91,70 +99,26 @@ class RestClient:
         parameters to add. If the path contains a query string the additional
         query param values will overwrite them.
         """
-        path = util.pretty_path(
-            '/'.join(['', self.base_url['path'], path]),
+        path = utils.pretty_path(
+            '/'.join(['', self.base_url.path, path]),
             True,
             False
         )
-        port = self.base_url['port']
+        port = self.base_url.port
         if port == 80 or port == 443:
             port = ''
         else:
             port = ':' + str(port)
         url = '%s://%s%s%s' % (
-            self.base_url['scheme'], self.base_url['hostname'], port, path
+            self.base_url.scheme, self.base_url.hostname, port, path
         )
         # has the base URL been set to include query params?
-        if self.base_url['query']:
-            url = self.merge_url_query(url, self.base_url['query'])
+        if self.base_url.query:
+            url = self.merge_url_query(url, self.base_url.query)
         # add in manually passed query args
         if query:
             url = self.merge_url_query(url, query)
         return url
-
-    def parse_url(self, url) -> dict:
-        """
-        Parses a URL into its components. Allows as little information as
-        possible (e.g. just a port, just a path), defaulting to
-        http://localhost:80/.
-        """
-        # urlparse just doesn't do it the "right" way...
-        # check for protocol and strip it off if found
-        parts = {
-            'scheme': None,
-            'hostname': None,
-            'port': None,
-            'path': None,
-            'params': None,
-            'query': None,
-            'fragment': None
-        }
-        # parse out the scheme, if present
-        if re.match('^\w+://', url):
-            (scheme, url) = url.split('://', 1)
-            parts['scheme'] = scheme.lower()
-        else:
-            parts['scheme'] = 'http'
-        # check for a path
-        if url.find('/') == -1:
-            hostname = url
-            url = ''
-        else:
-            (hostname, url) = url.split('/', 1)
-        # do we have a port in the hostname?
-        if hostname.find(':') >= 0:
-            # chop out the port
-            hostname, parts['port'] = hostname.split(':', 1)
-        if not hostname:
-            hostname = 'localhost'
-        parts['hostname'] = hostname.lower()
-        # let urlparse do the rest of the work on the path w/ a fake domain
-        parsed = urllib.parse.urlparse('http://localhost/' + url)
-        parts['path'] = parsed.path
-        parts['params'] = parsed.params
-        parts['query'] = parsed.query
-        parts['fragment'] = parsed.fragment
-        return parts
 
     def set_base_url(self, base_url):
         """
@@ -162,36 +126,13 @@ class RestClient:
         """
         if not base_url:
             raise ValueError('Invalid API URL: %s.' % base_url)
-        url = self.parse_url(base_url)
-        if url['scheme'] not in ['http', 'https']:
-            raise ValueError('Only HTTP and HTTPS are supported protocols.')
-        self.base_url = url
-        if url['port']:
-            self.set_port(url['port'])
-        else:
-            if url['scheme'] == 'https':
-                self.set_port(443)
-            else:
-                self.set_port(80)
-
-    def set_basic_auth(self, basic_auth:str):
-        self.basic_auth = basic_auth
-
-    def set_port(self, port):
-        """
-        Set the port that will be used for requests.
-        """
-        port = int(port)
-        if port >= 0 and port <= 65535:
-            self.base_url['port'] = port
-        else:
-            raise ValueError('Invalid API service port: %s.' % port)
+        self.base_url = Url.parse_str(base_url)
 
     def head(self, *req_args, **req_kwargs):
         """
         Perform a HEAD request with the provided query string parameters.
         """
-        return self.request('GET', *req_args, **req_kwargs)
+        return self.request('HEAD', *req_args, **req_kwargs)
 
     def get(self, *req_args, **req_kwargs):
         """
@@ -282,6 +223,7 @@ class RestClient:
                 'content-Type': 'application/json',
                 'accept': 'application/json',
             }),
+            'method': method,
         }
 
         # request headers (misc, cookies, auth, etc)
@@ -344,19 +286,21 @@ class RestClient:
                 dbg.log('Request Cookies:', data=self.cookies)
         request = urllib.request.Request(url, **request_args)
         try:
-            response = urllib.request.urlopen(request, context=self.ssl_ctx)
+            ms_started = time.time()
+            http_resp = urllib.request.urlopen(request, context=self.ssl_ctx)
         except urllib.request.HTTPError as error_resp:
-            response = error_resp
+            http_resp = error_resp
+        ms_finished = time.time()
         if verbose:
-            dbg.log('Response Status: ', data=response.status, data_inline=True)
+            dbg.log('Response Status: ', data=http_resp.status, data_inline=True)
             dbg.log('Response Headers:', data={
                     name: val
-                    for name, val in response.headers.items()
+                    for name, val in http_resp.headers.items()
                 }
             )
 
         # track any cookies we get back; ignore the path as a temp hack :/
-        for hdr_name, hdr_value in response.headers.items():
+        for hdr_name, hdr_value in http_resp.headers.items():
             if hdr_name.lower() == 'set-cookie':
                 cookies = http.cookies.BaseCookie(hdr_value)
                 for name in cookies:
@@ -364,31 +308,41 @@ class RestClient:
 
         # automatically decode the response body based on content-type
         # if we know the type of charset, perform the decoding automatically
-        resp_content_type = response.headers.get('Content-Type')
-        resp_data = response.read()
+        resp_content_type = http_resp.headers.get('Content-Type')
+        resp_data = http_resp.read()
+        decoded = resp_data
         if resp_data and resp_content_type and ';' in resp_content_type:
             charset = resp_content_type.split(';')[1].strip()
             if '=' in charset:
-                resp_data = resp_data.decode(charset.split('=')[1])
+                decoded  = resp_data.decode(charset.split('=')[1])
         if resp_content_type and resp_content_type.startswith('application/json'):
             try:
                 decoded = json.loads(resp_data)
             except:
                 raise ValueError('Failed to decode API response\n' + str(resp_data)[:128])
-        else:
-            decoded = resp_data
 
         # handle any HTTP response errors
-        response = Response(obj=response, decoded=decoded, data=resp_data)
-        if response.obj.status < 200 or response.obj.status >= 400:
+        duration_ms = int((ms_finished - ms_started) * 1000)
+        response = Response(
+            obj=http_resp,
+            decoded=decoded,
+            data=resp_data,
+            meta=ResponseMeta(
+                duration=utils.get_duration(duration_ms),
+                byte_size=utils.get_byte_size(len(resp_data)),
+                success=http_resp.status < 400,
+                code=http_resp.status,
+            )
+        )
+        if http_resp.status < 200 or http_resp.status >= 400:
             error_cls = HttpError
-            if response.obj.status >= 500:
+            if http_resp.status >= 500:
                 error_cls = ServerHttpError
-            elif response.obj.status >= 400:
+            elif http_resp.status >= 400:
                 error_cls = UserHttpError
             raise error_cls(
                 '"%s %s" failed (%s)' % (
-                    method, path, response.obj.status
+                    method, path, http_resp.status
                 ),
                 response,
             )
