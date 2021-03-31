@@ -292,7 +292,6 @@ def extract_path(obj, path, separator='/', prefix='', quiet=False, debug=False):
 def extract(
         data, indent=4, pairs=False, sort_keys=True, debug=False, quiet=False,
         separator='/', extract=None, exclude=None, exists=None, raw=False,
-        data_map=None, data_store=None
     ):
     if isinstance(data, str):
         obj = json.JSONDecoder().decode(data)
@@ -312,17 +311,6 @@ def extract(
                 # QQ, not found
                 retval = 1
                 break
-    # a simple way to allow callers to maintain a memory of interesting values
-    if data_map and data_store is not None:
-        for (key, path) in data_map:
-            data_store[key] = extract_path(
-                obj,
-                path.strip('/'),
-                path.strip('/'),
-                separator=separator,
-                quiet=True,
-                debug=debug
-            )
     # trim out any requested data
     if exclude:
         for path in exclude:

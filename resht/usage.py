@@ -31,7 +31,7 @@ HTTP OPTIONS (each may be specified multiple times)
    -d, --data NAME[+]=PATH  Store response data; '+' also adds variable to the env
 
 
-OTHER OPTIONS (may also be set via 'set' command)
+OTHER OPTIONS
    -B, --basic USER:PASS    HTTP basic authentication.
    -c, --color              Color formatted JSON responses (default=True).
    -C, --no-color           Do not color formatted JSON responses.
@@ -46,6 +46,8 @@ OTHER OPTIONS (may also be set via 'set' command)
    -v, --verbose            Print verbose debugging info to stderr.
    -x, --extract PATH       Parse JSON to return specific data; may be repeated.
    -X, --exclude PATH       Exclude specified path from JSON data; may be repeated.
+   > FILE                   Write API response to specified file.
+   >> FILE                  Append API response to specified file.
 """
 
 usage_params = \
@@ -89,19 +91,19 @@ usage_shell = \
 """
 SHELL COMMANDS
 ---------------------------------------------------------------------------
-   HTTP_VERB REL_URL [PARAMS] Perform an HTTP(S) request 
+   HTTP_VERB REL_URL [PARAMS] Perform an HTTP(S) request
    cd                         Change the base URL (e.g. "cd customers/8; cd ../9").
    help                       This information.
    quit                       Adios! (quit shell).
-   set                        Set configuration options.
-   config                     List current configuration infomation.
-   sh CMD                     Run a BASH shell command.
-   data [NAME] [-=NAME]       List variables in memory, optionally by name; -= to remove from memory
-   env [NAME] [[+-]=NAME]     List environmental variables, optionally by name; += or -= to add/remove 'data' from the environment
-   > FILE                     Write API response to specified file.
-   >> FILE                    Append API response to specified file.
+   headers [key=val, -key]    List, set, or clear headers.
+   set [PARAMS]               List or set configuration options.
+   sh EXPR                    Run a BASH shell command.
 """
 
+# TODO:
+# !python expr               Execute a python expression
+# \HTTP_VERB ... (no extra stuff for this one command)
+# env -i or such to clear
 
 usage_examples = \
 """

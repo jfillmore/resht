@@ -60,22 +60,24 @@ class RestClient:
     Client for talking to a web server using RESTful methods.
     """
     def __init__(
-            self, base_url:str = 'localhost', insecure:bool = False,
+            self,
+            base_url:str = 'localhost',
+            insecure:bool = False,
             basic_auth:str = None
         ):
         # the base URL information for construction API requests
         self.base_url = None
+        self.insecure = insecure
+        self.basic_auth = basic_auth
         self.cookies = {}  # session cookie cache
-        # if set, an oauth/basic authentication header will be included in each request
-        self.oauth = None
-        self.basic_auth = None
-        self.set_base_url(base_url)
+
+        # we'll pick the right context at request time based on 'insecure'
         self.ssl_ctx = ssl.create_default_context()
-        if insecure:
-            self.ssl_ctx.check_hostname = False
-            self.ssl_ctx.verify_mode = ssl.CERT_NONE
-        if basic_auth:
-            self.basic_auth = basic_auth
+        self.ssl_ctx_insecure = ssl.create_default_context()
+        self.ssl_ctx_insecure.check_hostname = False
+        self.ssl_ctx_insecure.verify_mode = ssl.CERT_NONE
+
+        self.set_base_url(base_url)
 
     @staticmethod
     def merge_headers(base_headers: dict, new_headers:dict = None):
@@ -93,28 +95,30 @@ class RestClient:
             merged[name.lower()] = val
         return merged
 
-    def build_url(self, path:str, query:str = None) -> str:
+    def build_url(self, path:str, query:str = None, base_url:Url = None) -> str:
         """
         Returns the full URL with the path given and any query string
         parameters to add. If the path contains a query string the additional
         query param values will overwrite them.
         """
+        if not base_url:
+            base_url = self.base_url
         path = utils.pretty_path(
-            '/'.join(['', self.base_url.path, path]),
+            '/'.join(['', base_url.path, path]),
             True,
             False
         )
-        port = self.base_url.port
+        port = base_url.port
         if port == 80 or port == 443:
             port = ''
         else:
             port = ':' + str(port)
         url = '%s://%s%s%s' % (
-            self.base_url.scheme, self.base_url.hostname, port, path
+            base_url.scheme, base_url.hostname, port, path
         )
         # has the base URL been set to include query params?
-        if self.base_url.query:
-            url = self.merge_url_query(url, self.base_url.query)
+        if base_url.query:
+            url = self.merge_url_query(url, base_url.query)
         # add in manually passed query args
         if query:
             url = self.merge_url_query(url, query)
@@ -186,6 +190,9 @@ class RestClient:
             full:bool = False,
             basic_auth:str = None,
             pre_formatted_body:bool = False,
+            insecure:bool = None,
+            base_url:str = None,
+            no_color:bool = False,
         ):
         """
         Perform an arbitrary HTTP request. If the base URL and/or path contain
@@ -212,16 +219,21 @@ class RestClient:
             query = '&'.join(query)
         elif isinstance(query, dict):
             query = self.build_query(query)
+        if insecure is None:
+            insecure = self.insecure
+        if base_url:
+            base_url = Url.parse_str(base_url)
         # TODO: allow params to be in the request body (e.g. like ElasticSearch prefers)
         if method in ['GET', 'HEAD'] and body:
             query = self.merge_query(self.build_query(body), query)
 
-        url = self.build_url(path, query)
+        url = self.build_url(path, query, base_url)
         request_args = {
             # to ensure we're always normalized we never set 'em directly
             'headers': self.merge_headers({
                 'content-Type': 'application/json',
                 'accept': 'application/json',
+                'user-agent': 'github.com/jfillmore/resht',
             }),
             'method': method,
         }
@@ -265,7 +277,7 @@ class RestClient:
                 if req_content_type.startswith('application/json'):
                     req_body = json.dumps(body).encode('utf-8')
                 elif req_content_type == 'application/x-www-form-urlencoded':
-                    req_body = urllib.parse.urlencode(body)
+                    req_body = urllib.parse.urlencode(body).encode('utf-8')
                 else:
                     # assume its already been encoded
                     req_body = body
@@ -276,27 +288,38 @@ class RestClient:
             dbg.log(
                 'Request:',
                 data=' %s %s' % (method.upper(), url),
-                data_inline=True
+                data_inline=True,
+                no_color=no_color,
             )
             if req_body:
-                dbg.log('Request Body: ', data=req_body, data_inline=True)
+                dbg.log('Request Body: ', data=req_body, data_inline=True, no_color=no_color)
             if request_args['headers']:
-                dbg.log('Request Headers:', data=request_args['headers'])
+                dbg.log('Request Headers:', data=request_args['headers'], no_color=no_color)
             if self.cookies:
-                dbg.log('Request Cookies:', data=self.cookies)
+                dbg.log('Request Cookies:', data=self.cookies, no_color=no_color)
         request = urllib.request.Request(url, **request_args)
         try:
             ms_started = time.time()
-            http_resp = urllib.request.urlopen(request, context=self.ssl_ctx)
+            http_resp = urllib.request.urlopen(
+                request,
+                context=self.ssl_ctx if not self.insecure else self.ssl_ctx_insecure,
+            )
         except urllib.request.HTTPError as error_resp:
             http_resp = error_resp
         ms_finished = time.time()
         if verbose:
-            dbg.log('Response Status: ', data=http_resp.status, data_inline=True)
-            dbg.log('Response Headers:', data={
+            dbg.log(
+                'Response Status: ',
+                data=http_resp.status,
+                data_inline=True,
+                no_color=no_color,
+            )
+            dbg.log(
+                'Response Headers:', data={
                     name: val
                     for name, val in http_resp.headers.items()
-                }
+                },
+                no_color=no_color
             )
 
         # track any cookies we get back; ignore the path as a temp hack :/
@@ -318,8 +341,8 @@ class RestClient:
         if resp_content_type and resp_content_type.startswith('application/json'):
             try:
                 decoded = json.loads(resp_data)
-            except:
-                raise ValueError('Failed to decode API response\n' + str(resp_data)[:128])
+            except Exception as e:
+                raise ValueError('Failed to decode API response\n' + str(resp_data)) from e
 
         # handle any HTTP response errors
         duration_ms = int((ms_finished - ms_started) * 1000)

@@ -4,6 +4,7 @@
 Shell for interacting with a RESTful server.
 """
 
+# FIXME: color vs no_color arg handling
 
 from collections import namedtuple
 from traceback import print_exception
@@ -12,9 +13,11 @@ import os
 import os.path
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
+import traceback
 import typing
 
 # import hacks!
@@ -24,22 +27,12 @@ import readline
 from . import jsonx
 from . import client
 from . import dbg
-from . import types
 from . import usage
+from . import types
 from . import utils
 
 
-xml_content_types = [
-    'application/xhtml+xml',
-    'application/xml',
-    'text/html',
-    'text/xml'
-]
-
-DataMap = namedtuple('DataMap', ['key', 'path'])
-
-
-class JSONException(Exception):
+class UserError(Exception):
     pass
 
 
@@ -47,7 +40,12 @@ class Shell:
     """
     Shell for interacting with REST client.
     """
-    # a list of our internal commands
+    aliases = {
+        'del': 'delete',
+        'opts': 'options',
+        'opt': 'options',
+        '?': 'help'
+    }
     http_methods = (
         'head',
         'get',
@@ -57,21 +55,15 @@ class Shell:
         'delete',
         'options'
     )
-    method_aliases = {
-        'del': 'delete',
-        'opts': 'options',
-        'opt': 'options',
-        '?': 'help'
-    }
-    cmds = {
-        'set': {},
-        'cd': {},
-        'reload': {},
-        'config': {},
-        'help': {},
-        'quit': {},
-        'sh': {}
-    }
+    commands = (
+        'cd',
+        'env',
+        'headers',
+        'help',
+        'quit',
+        'set',
+        'sh',
+    )
     _env = {
         'cwd': '/',  # where in the URL we are operating
         'last_cwd': '/',
@@ -85,72 +77,86 @@ class Shell:
         self.last_rv = False
         self.env(
             'histfile',
-            os.path.join(os.path.expanduser('~'), '.rest-cli_history')
+            os.path.join(os.path.expanduser('~'), '.resht_history')
         )
-        self.main_args = {
+        self.default_headers = types.Headers()
+        self.runtime_args = {
             'color': sys.stdout.isatty(),
             'formatted': True,
-            'headers': {},
-            'help': False,
             'insecure': False,
-            'shell': False,
-            'url': 'https://localhost:443/',
+            'base_url': 'https://localhost:443',
             'verbose': False,
         }
-        self.data_store = {}
-        # parse out our initial args
-        self.args = self.parse_args(argv, self.main_args)
-        self.client = client.RestClient(self.args['url'], self.args['insecure'])
-        if self.args['help']:
+        self.interactive = False
+
+        args = self.parse_cmd(argv)
+        # seed our defaults based on whatever was passed initially
+        self.runtime_args = utils.get_args(self.runtime_args, args)
+        self.default_headers.update(args['headers'])
+        self.client = client.RestClient(args['base_url'], args['insecure'])
+
+        if args['help']:
+            self.print_help()
             return
-        # run our initial command, possibly invoking shell mode after
-        if self.args['shell']:
+        if args['shell']:
             self.start(cmd=argv)
+        elif not args['verb']:
+            # nothing given, but not in shell mode... offer help!
+            self.print_help()
+            self.last_rv = 1
         else:
-            self.parse_cmd(argv, print_meta=self.args['verbose'])
+            # just do a one-off command
+            self.exec_cmd(cmd=argv, print_meta=args['verbose'])
 
     def start(
             self,
             cmd = None,
             read_history:bool = True,
         ):
+        # prepare the shell
+        self.interactive = True
+        if not cmd:
+            self.print_help(shell=True)
         if read_history:
             try:
                 readline.read_history_file(self.env('histfile'))
             except:
                 pass
-        # run APIs until the cows come home
-        try:
-            # run a command by default to start if needed
-            if cmd:
-                last_resp = self.parse_cmd(cmd, print_meta=True)
-            restart = False
-            while True:
-                last_resp = self.parse_cmd(
-                    input(self.get_prompt()),
+
+        # run APIs/commands, handling specific exceptions until the user quits
+        loop = True
+        while loop:
+            try:
+                # run a command by default to start if needed
+                if cmd:
+                    self.exec_cmd(cmd, print_meta=True)
+                    cmd = None
+                self.send_prompt()
+                self.exec_cmd(
+                    input(),
                     print_meta=True,
                 )
-        except KeyboardInterrupt as e:
-            pass
-        except EOFError as e:
-            pass
-        except ValueError as e:
-            dbg.log('Input error: ' + str(e) + '\n', symbol='!', color='0;31')
-            restart = True
-        except Exception as e:
-            print_exception(*sys.exc_info())
-            dbg.log(str(e) + '\n', symbol='!', color='0;31')
-        if restart:
-            self.start(read_history=False, last_resp_meta=last_resp_meta)
-        else:
-            self.stop()
-            return self.last_rv
+            except KeyboardInterrupt:
+                pass
+                loop = False
+            except EOFError as e:
+                pass
+                loop = False
+            except ValueError as e:
+                dbg.log('Input error: ' + str(e) + '\n', symbol='!', color='0;31', no_color=not self.runtime_args['color'])
+            except UserError as e:
+                dbg.log(str(e) + '\n', symbol='!', color='0;31', no_color=not self.runtime_args['color'])
+            except Exception as e:
+                print_exception(*sys.exc_info())
+                dbg.log(str(e) + '\n', symbol='!', color='0;31', no_color=not self.runtime_args['color'])
+        self.stop()
+        return self.last_rv
 
     def stop(self):
-        # save our history
         readline.write_history_file(self.env('histfile'))
+        self.interactive = False
 
-    def get_prompt(self, last_resp_meta=None):
+    def send_prompt(self, last_resp_meta=None):
         # TODO:
         # - show current settings (e.g. verbose)
         # - show default headers
@@ -176,36 +182,42 @@ class Shell:
             '\033[0;35m',
             '] ',
             '\033[1;37m',
-            '> ',
             '\033[0;0m'
         ]))
-        return '\n'.join(lines)
-
-    def set_edit_mode(self, mode):
-        # TODO: figure out why 'vi' doesn't let you use the 'm' key :/
-        modes = ['vi', 'emacs']
-        if mode in modes:
-            readline.parse_and_bind(''.join(['set', 'editing-mode', mode]))
-            self.args['edit_mode'] = mode
-        else:
-            raise Exception(''.join(['Invalid editing mode: ', mode, ' Supported modes are: ', ', '.join(modes), '.']))
+        sys.stdout.write('\n'.join(lines) + '\n')
 
     def print_help(self, shell=False):
-        dbg.log(usage.hints.shell, no_color=True, symbol='')
+        if shell:
+            dbg.log(usage.hints.shell, no_color=True, symbol='')
+        else:
+            dbg.log(usage.hints.help(), no_color=True, symbol='')
 
-    def parse_args(self, expr, arg_slice=None):
+    @staticmethod
+    def _split_arg(token:str) -> list:
+        """
+        Split out any combined arguments (e.g.-rf -> -r -f) for easier parsing.
+        """
+        if len(token) < 3 or token[0] != '-' or token[1] == '-':
+            return [token]
+        return [
+            f'-{char}'
+            for char in token[1:]
+        ]
+
+    def parse_cmd(self, expr):
+        # TODO: clean this up so we're more explicit about what we're doing: an API request or shell command, and where to find args
+        # some args have defaults based on our runtime args
         args = {
             'FILES': [],
             'api_args': {},
             'basic_auth': None,
             'cmd_args': [],
-            'color': self.main_args['color'],
-            'data': [],
+            'color': self.runtime_args['color'],
             'exclude': [],
             'extract': [],
-            'formatted': self.main_args['formatted'],
-            'headers': {},
-            'help': False,  # user just wanted some help
+            'formatted': self.runtime_args['formatted'],
+            'headers': self.default_headers.copy(),
+            'help': False,
             'insecure': False,
             'invert_color': False,
             'path': None,
@@ -213,164 +225,153 @@ class Shell:
             'redir_type': None,
             'shell': False,
             'stdout_redir': None,
-            'url': self.main_args['url'],
+            'base_url': self.runtime_args['base_url'],
             'verb': None,
             'verbose': False,
         }
         if isinstance(expr, str):
-            parts = shlex.split(expr)
+            tokens = shlex.split(expr)
         else:
-            parts = expr  # already a list
-        # check for any condensed parameters (e.g. -fr = -f, -r)
-        old_parts = parts[:]
-        for i in range(0, len(parts)):
-            part = parts[i]
-            if len(part) > 2 and part[0] == '-' and not (part[1] in ['-', '+', '=']):
-                # expand the parameters out
-                parts = parts[:i] + \
-                    [''.join(['-', param]) for param in parts[i][1:]] + \
-                    parts[i + 1:]
+            tokens = expr  # already a list
+
         i = 0
         # iterate through each paramter and handle it
-        while i < len(parts):
-            part = parts[i]
-            if len(part) == 0:
+        while i < len(tokens):
+            token = tokens[i]
+            # check for short combined params (e.g. -rf); commands never have these
+            if args['verb'] is None or args['verb'] in self.http_methods:
+                expanded = self._split_arg(token)
+                token = expanded[0]
+                tokens.extend(expanded[1:])
+
+            if not token:
                 pass
-            elif part == '>' or part[0] == '>' or part == '>>':
+
+            if token == '>' or token[0] == '>' or token == '>>':
                 # output redirection! woot
-                if part == '>' or parts == '>>':
+                if token == '>' or token == '>>':
                     i += 1
-                    if part == '>':
+                    if token == '>':
                         args['redir_type'] = 'w'
                     else:
                         args['redir_type'] = 'a'
-                    if i == len(parts):
+                    if i == len(tokens):
                         raise Exception("Missing file path to output result to.")
-                    args['stdout_redir'] = parts[i]
+                    args['stdout_redir'] = tokens[i]
                 else:
-                    if len(part) > 1 and part[0:2] == '>>':
-                        args['stdout_redir'] = part[2:]
+                    if len(token) > 1 and token[0:2] == '>>':
+                        args['stdout_redir'] = token[2:]
                         args['redir_type'] = 'a'
                     else:
-                        args['stdout_redir'] = part[1:]
+                        args['stdout_redir'] = token[1:]
                         args['redir_type'] = 'w'
-            elif part == '-B' or part == '--basic':
+            elif token == '-B' or token == '--basic':
                 i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing HTTP basic auth user/pass parameter.")
-                if ':' not in parts[i]:
+                if ':' not in tokens[i]:
                     raise Exception("Expected HTTP basic auth in format 'user:pass'.")
-                args['basic_auth'] = parts[i]
-            elif part == '-F' or part == '--file':
+                args['basic_auth'] = tokens[i]
+            elif token == '-F' or token == '--file':
                 i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing value for file to upload.")
                 # collect up the name
-                if parts[i].find('=') == -1 or parts[i].find('&') != -1:
+                if tokens[i].find('=') == -1 or tokens[i].find('&') != -1:
                     raise Exception("Invalid file name=file_path pair.")
-                (name, path) = parts[i].split('=', 1)
+                (name, path) = tokens[i].split('=', 1)
                 # make sure the file exists
                 if not os.path.isfile(path):
                     raise Exception("Unable to either read or locate file '%s." % path)
                 args['FILES'][name] = path
                 raise Exception("Not supported at the moment")
-            elif part == '-Q' or part == '--query':
+            elif token == '-Q' or token == '--query':
                 i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing query name=value pair.")
                 # make sure we have a valid pair
-                if parts[i].find('=') == -1 or parts[i].find('&') != -1:
+                if tokens[i].find('=') == -1 or tokens[i].find('&') != -1:
                     raise Exception("Invalid query name=value pair.")
-                args['query'].append(parts[i])
-            elif part == '-i' or part == '--invert':
+                args['query'].append(tokens[i])
+            elif token == '-i' or token == '--invert':
                 args['invert_color'] = True
-            elif part == '--insecure':
+            elif token == '--insecure':
                 args['insecure'] = True
-            elif part == '-c' or part == '--color':
+            elif token == '-c' or token == '--color':
                 args['color'] = True
-            elif part == '-C' or part == '--no-color':
+            elif token == '-C' or token == '--no-color':
                 args['color'] = False
-            elif part == '-v' or part == '--verbose':
+            elif token == '-v' or token == '--verbose':
                 args['verbose'] = True
-            elif part == '-f' or part == '--form':
-                args['headers']['content-type'] = 'application/x-www-form-urlencoded'
-            elif part == '-h' or part == '--help':
-                self.print_help()
+            elif token == '-f' or token == '--form':
+                args['headers'].add('content-type', 'application/x-www-form-urlencoded')
+            elif token == '-h' or token == '--help':
                 args['help'] = True
-            elif part == '-H' or part == '--header':
+            elif token == '-H' or token == '--header':
                 i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing value for HTTP header.")
-                h_parts = parts[i].split(': ', 1)
-                if len(h_parts) != 2:
-                    raise Exception("Invalid HTTP header.")
-                args['headers'][h_parts[0].lower()] = h_parts[1]
-            elif part == '-s' or part == '--shell':
+                hdr_parts = tokens[i].split(': ', 1)
+                if len(hdr_parts) != 2:
+                    raise Exception(f'Invalid HTTP header: "{tokens[i]}"')
+                args['headers'].add(hdr_parts[0], hdr_parts[1])
+            elif token == '-s' or token == '--shell':
                 args['shell'] = True
-            elif part == '-j' or part == '--json':
+            elif token == '-j' or token == '--json':
                 i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing value for JSON API params.")
                 try:
-                    api_args = self.decode(parts[i])
+                    api_args = self.decode(tokens[i])
                     if isinstance(api_args, dict):
                         args['api_args'].update(api_args)
                     else:
-                        raise JSONException("JSON values must be a dictionary of arguments.")
-                except JSONException as e:
+                        raise UserError("JSON values must be a dictionary of arguments.")
+                except UserError as e:
                     dbg.log(f'Invalid JSON: {e}')
                     raise e
                 except Exception as e:
                     dbg.log(f'Invalid JSON: {e}')
-                    raise JSONException(e)
-            elif part == '-r' or part == '--raw':
+                    raise UserError(e)
+            elif token == '-r' or token == '--raw':
                 args['formatted'] = False
-            elif part == '--url' or part == '-u':
+            elif token == '--url' or token == '-u':
                 i += 1
-                if i == len(parts):
-                    raise Exception("Missing value for URL.")
-                args['url'] = parts[i]
-            elif part == '-d' or part == '--data':
+                if i == len(tokens):
+                    raise Exception("Missing value for --url.")
+                args['base_url'] = tokens[i]
+            elif token == '-x' or token == '--extract':
                 i += 1
-                if i == len(parts):
-                    raise Exception("Missing value for --data.")
-                part = parts[i]
-                if part.index('=') == -1:
-                    raise Exception("Invalid parameter for --data: expected format NAME[+]=PATH")
-                args['data'].append(DataMap(*part.split('=', 1)))
-            elif part == '-x' or part == '--extract':
-                i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing value for --extract.")
-                args['extract'].append(parts[i])
-            elif part == '-X' or part == '--exclude':
+                args['extract'].append(tokens[i])
+            elif token == '-X' or token == '--exclude':
                 i += 1
-                if i == len(parts):
+                if i == len(tokens):
                     raise Exception("Missing value for --exclude.")
-                args['exclude'].append(parts[i])
+                args['exclude'].append(tokens[i])
             else:
                 # we always pick up the command/method first
                 if args['verb'] is None:
-                    args['verb'] = part.lower()
+                    args['verb'] = token.lower()
                     # process any aliases
-                    if args['verb'] in self.method_aliases:
-                        args['verb'] = self.method_aliases[args['verb']]
+                    if args['verb'] in self.aliases:
+                        args['verb'] = self.aliases[args['verb']]
                 elif args['verb'] in self.http_methods and args['path'] is None:
                     # collect the API -- unless this is a internal command
-                    args['path'] = utils.pretty_path(self.parse_path(part), False, False)
+                    args['path'] = utils.pretty_path(self.parse_path(token), False, False)
                 else:
                     # anything else is a parameter
                     if args['verb'] in self.http_methods:
                         # get the name/value
-                        args['api_args'] = self.parse_param(part, args['api_args'])
+                        args['api_args'] = self.parse_param(token, args['api_args'])
                     else:
-                        args['cmd_args'].append(part)
+                        args['cmd_args'].append(token)
             i += 1
-        if arg_slice is not None:
-            args = utils.get_args(arg_slice, args)
         return args
 
-    def parse_cmd(self, cli_cmd, print_meta: bool = False) -> typing.Union[types.Response, bool]:
+    def exec_cmd(self, cmd, print_meta: bool = False) \
+            -> typing.Union[types.Response, bool]:
         """
         Parse a shell command to either run an internal command or perform an
         HTTP request. Returns True if a command was successfully parsed, false
@@ -385,21 +386,15 @@ class Shell:
         shell (e.g. if using inside the rest shell).
         """
         # collect up the command parts
-        args = self.parse_args(cli_cmd)
+        args = self.parse_cmd(cmd)
         # not writing to a file by default
         file = None
         # run the command or API
+        # FIXME: clean up error handling and printing the response
         answer = None
-        if args['verb'] is None or len(args['verb']) == 0:
-            if self.args['shell']:
-                # no command, just do nothing
-                return True
-            else:
-                # no command and not in shell mode? offer some help
-                self.print_help()
-                self.last_rv = 1
-                return True
-        elif args['verb'] in self.http_methods:
+        if not args['verb'] and self.interactive:
+            raise UserError('No API or command given')
+        if args['verb'] in self.http_methods:
             # run an API
             try:
                 args['api_args'].update(self.env('vars'))
@@ -411,43 +406,54 @@ class Shell:
                     headers=args['headers'],
                     verbose=args['verbose'],
                     basic_auth=args['basic_auth'],
-                    full=True
+                    full=True,
+                    insecure=args['insecure'],
+                    base_url=args['base_url'],
+                    no_color=not args['color'],
                 )
                 response = answer.decoded
                 response_status = None
                 success = True
             except client.HttpError as e:
-                # TODO: remove?
                 success = False
                 response_status = str(e)
                 response = e.response.decoded
                 answer = e.response
-            except socket.error as e:
+            except Exception as e:
                 response_status = str(e)
                 response = None
                 success = False
                 answer = None
-            self.last_rv = int(not success)
             # prep response redirection, since it worked
             if args['stdout_redir'] is not None:
                 try:
                     file = open(args['stdout_redir'], args['redir_type'])
                 except IOError as e:
-                    dbg.log('Failed to write response: ' + e + '\n', symbol='!')
+                    dbg.log('Failed to write response: ' + e + '\n', symbol='!', no_color=not args['color'])
                     return answer
         else:
-            # run an internal command
             try:
-                return self.run_cmd(args['verb'], args['cmd_args'])
-            except Exception as e:
-                response_status = 'Syntax Error'
-                response = str(e)
+                return self.run_shell_cmd(args['verb'], args['cmd_args'])
+            except UserError as ex:
+                response = None
+                success = False
+                answer = None
+                response_status = '[' + type(ex).__name__ + '] ' + str(ex)
+            except Exception as ex:
+                code_trace = dbg.CodeTrace.from_exception(ex)
+                response_status = '[' + code_trace.error_type + '] ' + code_trace.error
+                response = [
+                    frame._asdict()
+                    for frame in code_trace.frames
+                ]
                 success = False
                 answer = None
                 if args['verbose']:
                     print_exception(*sys.exc_info())
+
         # adjust the response object as requested
-        if answer and (args['extract'] or args['exclude'] or args['data']):
+        self.last_rv = int(not success)
+        if answer and (args['extract'] or args['exclude']):
             # handle HTML vs JSON differently
             content_type = answer.obj.headers.get('Content-Type')
             to_store = {}
@@ -458,27 +464,14 @@ class Shell:
                         extract=args['extract'],
                         exclude=args['exclude'],
                         raw=True,
-                        data_map=args['data'],
-                        data_store=to_store
                     )
                     # if we only had one match return it instead of a single-element array for cleanliness
                     if len(response) == 1:
                         response = response[0]
                 except:
                     (exc_type, exc_msg, exc_tb) = sys.exc_info()
-                    dbg.log('%s\n' % exc_msg, symbol='!')
+                    dbg.log('%s\n' % exc_msg, symbol='!', no_color=not args['color'])
                     return True
-            # if we ended up storing any data, save it memory, noting any environmentals
-            for key in to_store:
-                # coerce single-values out of lists to stand on their own
-                if len(to_store[key]) == 1:
-                    to_store[key] = to_store[key][0]
-                clean_key = key
-                if key.endswith('+'):
-                    clean_key = key[:-1]
-                self.data_store[clean_key] = to_store[key]
-                if key.endswith('+'):
-                    self.env('vars')[clean_key] = to_store[key]
         self._print_response(
             success,
             response,
@@ -490,8 +483,12 @@ class Shell:
             redir_type=args['redir_type'],
             file=file
         )
-        if print_meta and not isinstance(answer, bool):
+        if print_meta and isinstance(answer, types.Response):
             self._print_response_meta(answer.meta)
+        if self.interactive:
+            sys.stdout.write(
+                '\033[1;4;30;40m' + (' ' * shutil.get_terminal_size().columns) + '\033[0m\n'
+            )
         return answer
 
     def _print_response_meta(self, resp_meta: types.ResponseMeta):
@@ -513,31 +510,29 @@ class Shell:
         ]) + '\n')
 
     def _print_response(self, success, response, status=None, **args):
-        # TODO: add stail and response footer info (success, size, speed)
+        # FIXME: untangle this crap
         if success:
             if response is not None:
                 if 'stdout_redir' in args and args['stdout_redir'] is not None:
-                    #response = json.dumps(
-                    #    response,
-                    #    ensure_ascii=True,
-                    #    sort_keys=True,
-                    #    indent=4
-                    #)
                     args['file'].write(dbg.obj2str(response, color=False))
                     args['file'].close()
                 else:
                     if isinstance(response, str):
+                        # FIXME: print full response string if its a command error vs API error
                         if args.get('formatted'):
                             chars_to_print = min(len(response), 256)
-                            dbg.log('# %d/%d chars%s\n' % (
-                                chars_to_print,
-                                len(response),
-                                (
-                                    ", use --raw|-r to see full output"
-                                    if chars_to_print < len(response)
-                                    else ""
-                                )
-                            ))
+                            dbg.log(
+                                '# %d/%d chars%s\n' % (
+                                    chars_to_print,
+                                    len(response),
+                                    (
+                                        ", use --raw|-r to see full output"
+                                        if chars_to_print < len(response)
+                                        else ""
+                                    )
+                                ),
+                                no_color=not args.get('color')
+                            )
                             print(response[0:chars_to_print])
                         else:
                             print(response)
@@ -554,18 +549,33 @@ class Shell:
             if isinstance(response, str):
                 if args['formatted']:
                     chars_to_print = min(len(response), 256)
-                    dbg.log('%s (%d/%d chars)\n:%s' % (
-                        status,
-                        chars_to_print,
-                        len(response),
-                        response[0:chars_to_print]
-                    ), symbol='!')
+                    dbg.log(
+                        '%s (%d/%d chars)\n:%s' % (
+                            status,
+                            chars_to_print,
+                            len(response),
+                            response[0:chars_to_print],
+                        ),
+                        symbol='!',
+                        color='1;31',
+                        no_color=not args.get('color'),
+                    )
                 else:
-                    dbg.log('%s:\n\033[0m%s' % (
-                        status, response
-                    ), symbol='!', color='1;31')
+                    dbg.log(
+                        '%s:\n\033[0m%s' % (
+                            status, response
+                        ),
+                        symbol='!',
+                        color='1;31',
+                        no_color=not args.get('color'),
+                    )
             else:
-                dbg.log('%s:' % (status), symbol='!', color='31')
+                dbg.log(
+                    '%s:' % (status),
+                    symbol='!',
+                    color='1;31',
+                    no_color=not args.get('color'),
+                )
                 if response is not None:
                     if args.get('formatted'):
                         dbg.pretty_print(
@@ -591,51 +601,50 @@ class Shell:
                 self._env[key] = value
                 return value
 
-    def parse_param(self, str, params={}):
+    def parse_param(self, str, params:dict = None, single=False) -> typing.Union[dict,tuple]:
         """
         Parse a CLI parameter, optionally merging it with existing passed
         parameters.
 
         Parameter encoding:
 
-        'foo', '!foo'
+        'foo', '!foo', '^foo'
             Bare word are treated as boolean values. True by default, false if
-            starting with an exclaimation point.
+            starting with an exclaimation point or carrot.
 
         'foo=bar', 'foo=0', 'foo.bar=42'
             Assign the string value to the key specified. If the key contains
-            dots than objects will be created automatically.
+            dots then objects will be created automatically.
 
         'foo:=3', 'foo.bar:=["a", "b", "c"]'
             Assign the JSON-encoded values to the key specified.
         """
+        if not params:
+            params = {}
+        elif single:
+            raise Exception('Cannot merge in params when parsing a single value')
         param_parts = str.split('=', 1)
-        param = param_parts[0]
+        key = param_parts[0]
         # no value given? treat it as a boolean
         if len(param_parts) == 1:
-            if param.startswith('^'):
+            if key.startswith('^') or key.startswith('!'):
                 value = False
+                key = key[1:]
             else:
                 value = True
-            param = param.lstrip('^')
         else:
             value = param_parts.pop()
             # check to see if we have a JSON value or are fetching from memory
-            if param.endswith(':'):  # e.g. 'foo:={"bar":42}'
+            if key.endswith(':'):  # e.g. 'foo:={"bar":42}'
                 value = self.decode(value)
-                param = param.rstrip(':')
-            elif param.endswith('+'):
-                param = param.rstrip('+')
-                if param not in self.data_store:
-                    raise Exception('Variable "%s" is not in memory' % param)
-                value = self.data_store[param]
+                key = key.rstrip(':')
         # check the name to see if we have a psuedo array
         # (e.g. 'foo.bar=3' => 'foo = {"bar": 3}')
-        if param.find('.') == -1:
-            params[param] = value
-        else:
+        if '.' in key:
+            if single:
+                raise Exception('Nested objects not allowed when parsing a single value')
             # break the array into the parts
-            p_parts = param.split('.')
+            p_parts = key.split('.')
             key = p_parts.pop()
             param_ptr = params
             for p_part in p_parts:
@@ -643,7 +652,9 @@ class Shell:
                     param_ptr[p_part] = {}
                 param_ptr = param_ptr[p_part]
             param_ptr[key] = value
-        return params
+        else:
+            params[key] = value
+        return (key, value,) if single else params
 
     def parse_path(self, path=''):
         """
@@ -681,7 +692,22 @@ class Shell:
             final_path = final_path + '/'
         return final_path
 
-    def run_cmd(self, cmd, params=None) -> types.Response:
+    def set_runtime_arg(self, name: str, val: any):
+        if name not in self.runtime_args:
+            raise Exception(f'Unrecognized configuration option: "{name}"')
+        # bool-ish arg handling
+        if name in ['formatted', 'insecure', 'verbose', 'color']:
+            if val in ['1', 'True', 'true', 't']:
+                val = True
+            elif val in ['0', 'False', 'false', 'f']:
+                val = False
+            else:
+                val = bool(val)
+        elif name == 'base_url':
+            self.client.set_base_url(val)
+        self.runtime_args[name] = val
+
+    def run_shell_cmd(self, cmd, params=None) -> types.Response:
         """
         Run a command using the specified parameters.
         """
@@ -689,85 +715,48 @@ class Shell:
             params = []
         if cmd == 'set':
             # break the array into the parts
-            for str in params:
-                pair = self.parse_param(str)
-                param = pair.keys()[0]
-                val = pair[param]
-                if not (param in self.args):
-                    raise Exception('Unrecognized parameter: "%s". Enter "%shelp" or "%sh" for help.' % (param, self._cmd_char, self._cmd_char))
-                if param in ['invert', 'color', 'formatted', 'verbose', 'headers']:
-                    # just so there is no confusion on these...
-                    if val in ['1', 'true', 'True']:
-                        val = True
-                    elif val in ['0', 'false', 'False']:
-                        val = False
-                    self.args[param] = val
-                elif param == 'edit_mode':
-                    self.set_edit_mode(val)
-                else:
-                    raise Exception("Unrecognized configuration option: " + param + ".")
-        elif cmd == 'env':
-            sys.stdout.write('ENV:\n')
             if not params:
-                params = self.env('vars').keys()
+                self._print_response(
+                    success=True,
+                    response=self.runtime_args,
+                    color=self.runtime_args['color'],
+                    formatted=True,
+                )
+            # allow multiple runtime args to be set at once
             for param in params:
-                remove = False
-                add = False
-                if param.startswith('-='):
-                    remove = True
-                    param = param[2:]
-                if param.startswith('+='):
-                    add = True
-                    param = param[2:]
-                if add and param in self.data_store:
-                    self.env('vars')[param] = self.data_store[param]
-                if param in self.env('vars'):
-                    value = self.env('vars')[param]
-                    if remove:
-                        sys.stdout.write('%s -= ' % (param))
-                        del self.env('vars')[param]
-                    elif add:
-                        sys.stdout.write('%s +=' % (param))
-                    else:
-                        sys.stdout.write('%s = ' % (param))
-                    sys.stdout.write(self.encode(value))
-                    sys.stdout.write('\n')
+                self.set_runtime_arg(*self.parse_param(param, single=True))
         elif cmd == 'debug':
             import pdb
             pdb.set_trace()
-        elif cmd == 'data':
-            sys.stdout.write('DATA:\n')
-            if not params:
-                params = self.data_store.keys()
-            for param in params:
-                remove = False
-                if param.startswith('-='):
-                    remove = True
-                    param = param[2:]
-                if param in self.data_store:
-                    value = self.data_store[param]
-                    if remove:
-                        sys.stdout.write('%s -= ' % (param))
-                        del self.data_store[param]
-                    else:
-                        sys.stdout.write('%s = ' % (param))
-                    sys.stdout.write(self.encode(value))
-                    sys.stdout.write('\n')
         elif cmd == 'cd':
             path = ''
             if len(params):
                 path = params[0]
             self.env('cwd', self.parse_path(path))
-        elif cmd == 'config':
-            dbg.pp(self.args)
+        elif cmd == 'headers':
+            if not params:
+                dbg.pretty_print(self.default_headers.as_dict())
+            for param in params:
+                if param.startswith('-'):
+                    name = param[1:]
+                    removed = self.default_headers.remove(name)
+                    if removed:
+                        sys.stdout.write(f'\033[1;37mHeader "{name}" cleared\033[0m')
+                    else:
+                        sys.stdout.write(f'H\033[1;37meader "{name}" was already clear\033[0m')
+
+                else:
+                    name, val = self.parse_param(param, single=True)
+                    self.default_headers.add(name, val)
+                    sys.stdout.write(f'\033[1;32m+{name}\033[0m\n')
             sys.stdout.write('\n')
         elif cmd == 'quit':
-            return Response(success=False)
+            return types.Response(success=False)
         elif cmd == 'help':
-            self.print_help()
+            self.print_help(shell=True)
         elif cmd == 'sh':
             # TODO: format better
             proc = subprocess.Popen(params)
         else:
-            raise Exception('Unrecognized command: "%s". Enter "help" for help.' % (cmd))
+            raise UserError('Unrecognized command: "%s". Enter "help" or ? for help.' % (cmd))
         return True

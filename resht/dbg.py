@@ -3,12 +3,13 @@ Uses python introspection to provide PHP-like "var_dump" functionality for
 debugging objects.
 """
 
+import inspect
 import json
+import os
 import sys
 import time
 import traceback
-import types
-import inspect
+import typing
 
 
 dark_colors = {
@@ -48,6 +49,39 @@ light_colors = {
     'bullet': '1;30',
     'seperator': '1;30'
 }
+
+class CodeFrame(typing.NamedTuple):
+    line: int
+    where: str
+    depth: int
+    ours: bool  # e.g. a module or something of our own?
+
+
+class CodeTrace(typing.NamedTuple):
+    frames: list[CodeFrame]
+    error: str
+    error_type: str
+
+    @classmethod
+    def from_exception(cls, ex: Exception):
+        tb = ex.__traceback__
+        cwd = os.getcwd()
+        frames = []
+        for i, frame in enumerate(traceback.extract_tb(tb)):
+            code_line = frame.name + ' - ' + frame.filename[len(cwd) + 1:]
+            frames.append(CodeFrame(
+                depth=i,
+                line=frame.line,
+                ours=frame.filename.startswith(cwd),
+                where=f'{code_line}:{frame.lineno}',
+            ))
+
+        return cls(
+            error=str(ex),
+            error_type=type(ex).__name__,
+            frames=frames,
+        )
+
 
 
 def get_obj_info(obj, include_private=False):
@@ -110,31 +144,34 @@ def log(
         msg, color='1;34', data=None, data_color='0;32', data_inline=False,
         symbol='#', no_color=False,
     ):
-    color_parts = color.split(';', 1)
-    if len(color_parts) > 1:
-        is_light = bool(int(color_parts[0]))
-        hue = color_parts[1]
-    else:
-        is_light = False
-        hue = color_parts[0]
-    color_alt = str(int(not is_light)) + ';' + hue
     if no_color:
-        color='0'
-        data_color='0'
-        color_alt='0'
-    log_str = f'\033[{color_alt}m{symbol}\033[0m ' if symbol else ''
-    log_str += f'\033[{color}m{msg}\033[0m' + ('' if data_inline else '\n')
+        color = None
+        data_color = None
+        color_alt = None
+    else:
+        color_parts = color.split(';', 1)
+        if len(color_parts) > 1:
+            is_light = bool(int(color_parts[0]))
+            hue = color_parts[1]
+        else:
+            is_light = False
+            hue = color_parts[0]
+        color_alt = str(int(not is_light)) + ';' + hue
+
+    log_str = (shell_color(symbol, color_alt) + ' ') if symbol else ''
+    log_str += shell_color(msg, color) + ('' if data_inline else '\n')
     sys.stderr.write(log_str)
+
     if data is not None:
         if isinstance(data, bytes):
             data = data.decode('utf-8')
-        data_str = data if isinstance(data, str) else json.dumps(data, indent=4) 
-        sys.stderr.write(f'\033[{data_color}m%s\033[0m\n' % data_str)
+        data_str = data if isinstance(data, str) else json.dumps(data, indent=4)
+        sys.stderr.write(shell_color(data_str, data_color) + '\n')
 
 
-def shell_color(obj, obj_color=None):
-    if obj_color:
-        return f'\033[{obj_color}m{str(obj)}\033[0;0m'
+def shell_color(obj, color=None, skip_color=False):
+    if color and not skip_color:
+        return f'\033[{color}m{str(obj)}\033[0;0m'
     return str(obj)
 
 
@@ -145,7 +182,6 @@ def obj2str(
     """
     Returns a formatted string, optionally with color coding
     """
-
     palette = light_colors if invert_color else dark_colors
 
     def rdump(obj, depth=0, indent_size=4, inline=False, short_form=False):
@@ -157,7 +193,7 @@ def obj2str(
         # see what we've got and recurse as needed
         if obj_info['type'] == 'list':
             if not len(obj):
-                dump += shell_color(' []', palette['object']) + '\n'
+                dump += shell_color(' []', palette['object'], skip_color=not color) + '\n'
             else:
                 skip_next_indent = True
                 for i in range(0, len(obj)):
@@ -169,7 +205,11 @@ def obj2str(
                     else:
                         dump += depth * (indent_size * indent_char)
                     # add in the key, cycling through the available colors based on depth
-                    dump += shell_color(i, palette[obj_info['type']][(depth) % (len(palette[obj_info['type']]))])
+                    dump += shell_color(
+                        i,
+                        palette[obj_info['type']][(depth) % (len(palette[obj_info['type']]))],
+                        skip_color=not color,
+                    )
                     # format it depending on whether we've nested list with any empty items
                     if item_info['type'] in ('dict', 'tuple', 'list'):
                         if not len(item):
@@ -180,7 +220,7 @@ def obj2str(
                         dump += rdump(item, 1, 1)
         elif obj_info['type'] == 'dict':
             if not len(obj):
-                dump += shell_color(' {}', palette['object']) + '\n'
+                dump += shell_color(' {}', palette['object'], skip_color=not color) + '\n'
             else:
                 skip_next_indent = True
                 for key in obj:
@@ -192,9 +232,9 @@ def obj2str(
                     else:
                         dump += depth * (indent_size * indent_char)
                     # add in the key, cycling through the available colors based on depth
-                    dump += shell_color(key, palette[obj_info['type']][(depth) % (len(palette[obj_info['type']]))])
+                    dump += shell_color(key, palette[obj_info['type']][(depth) % (len(palette[obj_info['type']]))], skip_color=not color)
                     # add in a bullet
-                    dump += shell_color(':', palette['bullet'])
+                    dump += shell_color(':', palette['bullet'], skip_color=not color)
                     # format it depending on whether we've nested list with any empty items
                     if item_info['type'] in ('dict', 'tuple', 'list'):
                         if not len(item):
@@ -207,23 +247,23 @@ def obj2str(
                         dump += rdump(item, 1, 1)
         elif obj_info['type'] == 'tuple':
             if not len(obj):
-                dump += shell_color(' ()', palette['object'])
+                dump += shell_color(' ()', palette['object'], skip_color=not color)
             else:
-                dump += shell_color('(', palette['bullet'])
+                dump += shell_color('(', palette['bullet'], skip_color=not color)
                 dump += ', '.join([str(item)[0:32] for item in obj if item != ()])
-                dump += shell_color(')', palette['bullet'])
+                dump += shell_color(')', palette['bullet'], skip_color=not color)
         elif obj_info['type'] == 'str':
-            dump += shell_color(obj, palette[obj_info['type']])
+            dump += shell_color(obj, palette[obj_info['type']], skip_color=not color)
         elif obj_info['type'] == 'bool':
-            dump += shell_color(obj, palette[obj_info['type']])
+            dump += shell_color(obj, palette[obj_info['type']], skip_color=not color)
         elif obj_info['type'] == 'NoneType':
-            dump += shell_color('(none/null)', palette[obj_info['type']])
+            dump += shell_color('(none/null)', palette[obj_info['type']], skip_color=not color)
         elif obj_info['type'] == 'int':
-            dump += shell_color(obj, palette[obj_info['type']])
+            dump += shell_color(obj, palette[obj_info['type']], skip_color=not color)
         elif obj_info['type'] == 'float':
-            dump += shell_color(obj, palette[obj_info['type']])
+            dump += shell_color(obj, palette[obj_info['type']], skip_color=not color)
         elif obj_info['type'] == 'object':
-            dump += shell_color('(object)', palette[obj_info['type']])
+            dump += shell_color('(object)', palette[obj_info['type']], skip_color=not color)
         elif obj_info['type'] == 'instance':
             dump += rdump(obj_info, depth)
         elif obj_info['type'] == 'module':

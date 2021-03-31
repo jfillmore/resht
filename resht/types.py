@@ -30,6 +30,60 @@ class ResponseMeta(NamedTuple):
     code: int
 
 
+class Headers:
+    """
+    Wrapper around HTTP header management forcing lowercase keys and ensuring duplication.
+    """
+    def __init__(self, headers: dict = None):
+        self._headers = {}
+        self.update(headers)
+
+    def as_dict(self):
+        return {
+            name: val
+            for name, val in self._headers.items()
+        }
+
+    def get(self, key, default=None):
+        key_lower = key.lower()
+        if key_lower in self._headers:
+            return self._headers[key_lower]
+        return default
+
+    def add(self, key:str, val:str, update_only:bool = False):
+        key_lower = key.lower()
+        if update_only and not self.exists(key_lower):
+            raise ValueError(f'No header named "key" exists; cannot add')
+        self._headers[key_lower] = val
+
+    def exists(self, key:str) -> bool:
+        return key.lower in self._headers
+
+    def remove(self, key:str, ignore_missing=True) -> bool:
+        """
+        Delete a header and return whether not it was actually deleted.
+        """
+        key_lower = key.lower()
+        if key_lower in self._headers:
+            del(self._headers[key_lower])
+            return True
+        elif not ignore_missing:
+            raise ValueError(f'No header named "key" exists; cannot remove')
+        return False
+
+    def update(self, headers: dict):
+        if not headers:
+            return
+        for key, val in headers.items():
+            self.add(key, val)
+
+    def copy(self):
+        return Headers(self._headers.copy())
+
+    def items(self):
+        return self._headers.items()
+
+
 class Response(NamedTuple):
     obj: any
     decoded: any
@@ -101,7 +155,7 @@ class Url(NamedTuple):
         # do we have a port in the hostname?
         if hostname.find(':') >= 0:
             # chop out the port
-            hostname, parts['port'] = hostname.split(':', 1)
+           hostname, parts['port'] = hostname.split(':', 1)
         if not hostname:
             hostname = 'localhost'
         parts['hostname'] = hostname.lower()

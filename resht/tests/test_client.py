@@ -12,25 +12,10 @@ import re
 import unittest
 
 from resht.client import RestClient
+from resht.types import Headers
 
 
 HTTP_VERBS = ['head', 'get', 'post', 'put', 'patch', 'delete']
-
-class Headers:
-    def __init__(self, headers: dict = None):
-        self.headers = {}
-        if headers:
-            for key, val in headers.items():
-                self.headers[key.lower()] = val
-
-    def get(self, key, default=None):
-        key_lower = key.lower()
-        if key_lower in self.headers:
-            return self.headers[key_lower]
-        return default
-
-    def items(self):
-        return self.headers.items()
 
 
 class MockResponse:
@@ -274,7 +259,7 @@ class TestClient(unittest.TestCase, TestHelpers):
         """
         body = {'foo': 'bar'}
         body_json = json.dumps(body).encode('utf-8')
-        body_form = 'foo=bar'
+        body_form = b'foo=bar'
         json_header_arg_list = [
             None,
             {'content-type': 'application/json'},
