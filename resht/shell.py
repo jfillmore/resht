@@ -472,6 +472,7 @@ class Shell:
                     (exc_type, exc_msg, exc_tb) = sys.exc_info()
                     dbg.log('%s\n' % exc_msg, symbol='!', no_color=not args['color'])
                     return True
+        # FIXME: bytes by defaults causes an obj dump of Python bytes
         self._print_response(
             success,
             response,
@@ -511,6 +512,9 @@ class Shell:
 
     def _print_response(self, success, response, status=None, **args):
         # FIXME: untangle this crap
+        if isinstance(response, bytes):
+            # best assumption at this point
+            response = response.decode('utf-8')
         if success:
             if response is not None:
                 if 'stdout_redir' in args and args['stdout_redir'] is not None:
@@ -522,7 +526,7 @@ class Shell:
                         if args.get('formatted'):
                             chars_to_print = min(len(response), 256)
                             dbg.log(
-                                '# %d/%d chars%s\n' % (
+                                '%d/%d chars%s' % (
                                     chars_to_print,
                                     len(response),
                                     (
@@ -531,7 +535,8 @@ class Shell:
                                         else ""
                                     )
                                 ),
-                                no_color=not args.get('color')
+                                no_color=not args.get('color'),
+                                color='1;37',
                             )
                             print(response[0:chars_to_print])
                         else:

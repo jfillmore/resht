@@ -337,7 +337,7 @@ class RestClient:
         if resp_data and resp_content_type and ';' in resp_content_type:
             charset = resp_content_type.split(';')[1].strip()
             if '=' in charset:
-                decoded  = resp_data.decode(charset.split('=')[1])
+                decoded = resp_data.decode(charset.split('=')[1])
         if resp_content_type and resp_content_type.startswith('application/json'):
             try:
                 decoded = json.loads(resp_data)
