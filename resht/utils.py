@@ -1,6 +1,7 @@
 import decimal
 import functools
 import re
+import subprocess
 
 from . import types
 
@@ -86,3 +87,20 @@ def get_byte_size(val, precision:int = 2) -> types.ByteSize:
     if prev_limit:
         remainder = round(remainder / prev_limit, precision)
     return types.ByteSize(value=remainder, unit=best_unit, num_bytes=val)
+
+def run(cmd, **popen_args):
+    """
+    Run a shell command and return tuple of (stdout, stderr, retval).
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **popen_args
+        )
+        stdout, stderr = proc.communicate()
+    except Exception as e:
+        return None, str(e), 127
+    return stdout.decode('utf-8'), stderr.decode('utf-8'), proc.returncode

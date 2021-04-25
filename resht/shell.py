@@ -15,7 +15,6 @@ import re
 import shlex
 import shutil
 import socket
-import subprocess
 import sys
 import traceback
 import typing
@@ -130,7 +129,8 @@ class Shell:
                 # run a command by default to start if needed
                 if cmd:
                     self.exec_cmd(cmd, print_meta=True)
-                    cmd = None
+                    self._print_delimiter()
+                    cmd = None  # don't wanna do it again every loop!
                 self.send_prompt()
                 self.exec_cmd(
                     input(),
@@ -149,6 +149,8 @@ class Shell:
             except Exception as e:
                 print_exception(*sys.exc_info())
                 dbg.log(str(e) + '\n', symbol='!', color='0;31', no_color=not self.runtime_args['color'])
+            self._print_delimiter()
+
         self.stop()
         return self.last_rv
 
@@ -219,7 +221,6 @@ class Shell:
             'headers': self.default_headers.copy(),
             'help': False,
             'insecure': False,
-            'invert_color': False,
             'path': None,
             'query': [],
             'redir_type': None,
@@ -293,9 +294,7 @@ class Shell:
                 if tokens[i].find('=') == -1 or tokens[i].find('&') != -1:
                     raise Exception("Invalid query name=value pair.")
                 args['query'].append(tokens[i])
-            elif token == '-i' or token == '--invert':
-                args['invert_color'] = True
-            elif token == '--insecure':
+            elif token == '-I' or token == '--insecure':
                 args['insecure'] = True
             elif token == '-c' or token == '--color':
                 args['color'] = True
@@ -393,6 +392,7 @@ class Shell:
         # FIXME: clean up error handling and printing the response
         answer = None
         if not args['verb'] and self.interactive:
+            # FIXME: should be able to enter shell mode w/o running an initial API; right now this loops
             raise UserError('No API or command given')
         if args['verb'] in self.http_methods:
             # run an API
@@ -437,7 +437,6 @@ class Shell:
             except UserError as ex:
                 response = None
                 success = False
-                answer = None
                 response_status = '[' + type(ex).__name__ + '] ' + str(ex)
             except Exception as ex:
                 code_trace = dbg.CodeTrace.from_exception(ex)
@@ -447,7 +446,6 @@ class Shell:
                     for frame in code_trace.frames
                 ]
                 success = False
-                answer = None
                 if args['verbose']:
                     print_exception(*sys.exc_info())
 
@@ -472,25 +470,25 @@ class Shell:
                     (exc_type, exc_msg, exc_tb) = sys.exc_info()
                     dbg.log('%s\n' % exc_msg, symbol='!', no_color=not args['color'])
                     return True
-        # FIXME: bytes by defaults causes an obj dump of Python bytes
         self._print_response(
             success,
             response,
             response_status,
             formatted=args['formatted'],
             color=args['color'],
-            invert_color=args['invert_color'],
             stdout_redir=args['stdout_redir'],
             redir_type=args['redir_type'],
             file=file
         )
         if print_meta and isinstance(answer, types.Response):
             self._print_response_meta(answer.meta)
+        return answer
+
+    def _print_delimiter(self):
         if self.interactive:
             sys.stdout.write(
                 '\033[1;4;30;40m' + (' ' * shutil.get_terminal_size().columns) + '\033[0m\n'
             )
-        return answer
 
     def _print_response_meta(self, resp_meta: types.ResponseMeta):
         if resp_meta.success:
@@ -546,7 +544,6 @@ class Shell:
                             dbg.pretty_print(
                                 response,
                                 color=args.get('color'),
-                                invert_color=args.get('invert_color')
                             )
                         else:
                             print(json.dumps(response, indent=4, sort_keys=True))
@@ -586,7 +583,6 @@ class Shell:
                         dbg.pretty_print(
                             response,
                             color=args.get('color'),
-                            invert_color=args.get('invert_color')
                         )
                     else:
                         print(json.dumps(response, indent=4, sort_keys=True))
@@ -606,7 +602,9 @@ class Shell:
                 self._env[key] = value
                 return value
 
-    def parse_param(self, str, params:dict = None, single=False) -> typing.Union[dict,tuple]:
+    def parse_param(
+            self, param, params:dict = None, single=False
+        ) -> typing.Union[dict,tuple]:
         """
         Parse a CLI parameter, optionally merging it with existing passed
         parameters.
@@ -628,7 +626,7 @@ class Shell:
             params = {}
         elif single:
             raise Exception('Cannot merge in params when parsing a single value')
-        param_parts = str.split('=', 1)
+        param_parts = param.split('=', 1)
         key = param_parts[0]
         # no value given? treat it as a boolean
         if len(param_parts) == 1:
@@ -748,20 +746,30 @@ class Shell:
                     if removed:
                         sys.stdout.write(f'\033[1;37mHeader "{name}" cleared\033[0m')
                     else:
-                        sys.stdout.write(f'H\033[1;37meader "{name}" was already clear\033[0m')
+                        sys.stdout.write(f'\033[1;37mHeader "{name}" was already clear\033[0m')
 
                 else:
                     name, val = self.parse_param(param, single=True)
                     self.default_headers.add(name, val)
-                    sys.stdout.write(f'\033[1;32m+{name}\033[0m\n')
+                    sys.stdout.write(f'\033[1;32m+ "{name}: {val}"\033[0m\n')
             sys.stdout.write('\n')
         elif cmd == 'quit':
             return types.Response(success=False)
         elif cmd == 'help':
             self.print_help(shell=True)
         elif cmd == 'sh':
-            # TODO: format better
-            proc = subprocess.Popen(params)
+            stdout, stderr, retval = utils.run(params)
+            if stdout:
+                sys.stdout.write(stdout)
+                if not stdout.endswith('\n'):
+                    sys.stdout.write('\n')
+            if stderr:
+                sys.stderr.write('\033[1;31m' + stderr + '\033[0m')
+                if not stderr.endswith('\n'):
+                    sys.stderr.write('\n')
+            if retval != 0:
+                sys.stderr.write(f'\033[0;30;41m {str(retval)} \033[4;31;40m shell command failed\033[0m\n')
+
         else:
             raise UserError('Unrecognized command: "%s". Enter "help" or ? for help.' % (cmd))
         return True

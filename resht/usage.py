@@ -2,75 +2,93 @@ from typing import NamedTuple
 
 
 class UsageHint(NamedTuple):
-    args: str
+    overview: str
+    examples: str
+    arguments: str
     params: str
     data_paths: str
     shell: str
-    examples: str
 
     def help(self):
         return ''.join([
-            self.args,
+            self.overview,
+            self.examples,
+            self.arguments,
             self.params,
             self.data_paths,
             self.shell,
-            self.examples,
         ])
 
 
-usage_args = """
-USAGE: resht HTTP-VERB|COMMAND API_PATH [API_PARAMS] [ARGUMENTS]
+usage_overview = """
+USAGE: resht HTTP-VERB PATH [API_PARAMS] [ARGUMENTS]
 
+JSON-oriented REST API client with shell mode for session-based flows.
+"""
+
+usage_arguments = """
 ARGUMENTS
 ---------------------------------------------------------------------------
 
-HTTP OPTIONS (each may be specified multiple times)
-   -f, --form               Override default of sending JSON data
-   -H, --header HEADER      HTTP header (e.g. 'Foo: bar') .
-   -Q, --query QUERY_DATA   Query data to include (e.g. foo=bar&food=yummy).
-   -d, --data NAME[+]=PATH  Store response data; '+' also adds variable to the env
-
-
-OTHER OPTIONS
+    REQUEST ARGS
    -B, --basic USER:PASS    HTTP basic authentication.
+   -d, --data DATA          Set request body to the string given; cannot be
+                            used with API params or --json
+   -H, --header HEADER      HTTP header (e.g. 'Foo: bar', repeatable)
+   -I, --insecure           Do not valid SSL certificates (dangerous!)
+   -Q, --query QUERY_DATA   Extra query data to merge
+                            (e.g. "foo=bar&food=yummy", repeatable).
+   -f, --form               Override default of sending JSON data
+   -j, --json STRING        Merge JSON-encoded string into API params (repeatable)
+   -u, --url URL            Base URL for API requests (default: https://localhost/).
+
+
+    MISC ARGS
+   -h, --help               This information.
+   -s, --shell              Start shell mode; run initial API
+   -v, --verbose            Print verbose debugging info to stderr.
+
+    OUTPUT ARGS:
    -c, --color              Color formatted JSON responses (default=True).
    -C, --no-color           Do not color formatted JSON responses.
-   -h, --help               This information.
-   -I, --invert             Invert colors in formatted JSON responses.
-       --insecure           Do not valid SSL certificates (danger!)
-   -j, --json STRING        Append JSON-encoded list to API parameters.
-   -q, --quiet              Do not print API return response.
    -r, --raw                Don't format response data; return raw response.
-   -s, --shell              Shell mode for running multiple APIs within a session.
-   -u, --url URL            URL to the API location (default: https://localhost/).
-   -v, --verbose            Print verbose debugging info to stderr.
    -x, --extract PATH       Parse JSON to return specific data; may be repeated.
    -X, --exclude PATH       Exclude specified path from JSON data; may be repeated.
    > FILE                   Write API response to specified file.
    >> FILE                  Append API response to specified file.
 """
 
+# TODO: foo.bar[]=1 foo.bar[]= for arrays?
 usage_params = \
 """
 API PARAMS
 ---------------------------------------------------------------------------
-Dictionaries can be created on demand using dot notation. Multiple params within the same dictionary will merge together. Values are always encoded as strings unless ":=" is used to assign the value.
+    API parameters are defined through a terse dotted notation making nested
+    objects easy to quickly define. Non-boolean values are assigned using
+    the delimiter "=" (string) or ":=" (JSON encoded).
 
-   foo                      {"foo": true}
-   ^foo                     {"foo": false}
-   foo=bar                  {"foo": "bar"}
-   foo.bar=3 foo.bard=abc   {"foo": {"bar": "3", "bard": "abc"}}
-   foo:='{"bar":3}'         {"foo": {"bar": 3}}
-   foo.bar:=3.14            {"foo": {"bar": 3.14}}
+    Arrays must be created using ":=" or using "-d|--data".
 
-Variables in memory (e.g. shown by 'data' command) may be referenced using "+=" as the operator.
+    BOOLEANS:
+       foo                      {"foo": true}
+       foo.bar                  {"foo": {"bar": true}}
+       ^foo                     {"foo": false}
+       !foo                     {"foo": false}
+
+    STRINGS:
+       foo=bar                  {"foo": "bar"}
+       foo.bar=3 foo.bard=abc   {"foo": {"bar": "3", "bard": "abc"}}
+
+    OTHER (RAW JSON):
+       foo:='{"bar":3}'         {"foo": {"bar": 3}}
+       foo.bar:=3.14            {"foo": {"bar": 3.14}}
 """
 
 usage_data_paths = \
 """
-JSON PATHS  (--extract, --exclude, --data)
+JSON PATHS  (-x|--extract, -X|--exclude)
 ---------------------------------------------------------------------------
-The JSON data can be filtered based on index, key matches, ranges, etc.
+    The JSON data can be filtered based on index, key matches, ranges, etc.
 
     Arrays:
         By Index:
@@ -83,7 +101,7 @@ The JSON data can be filtered based on index, key matches, ranges, etc.
     Dictionaries:
         Regular Expressions:
          - 'foo/b..?r' = foo/bar, foo/beer
-         - 'foo/bar/.*[pP]assw(or)?d' == anything within foo/bar that looks like a password
+         - 'foo/bar/.*[pP]assw(or)?d' == anything within foo/bar like a password
 """
 
 
@@ -91,7 +109,7 @@ usage_shell = \
 """
 SHELL COMMANDS
 ---------------------------------------------------------------------------
-   HTTP_VERB REL_URL [PARAMS] Perform an HTTP(S) request
+   HTTP_VERB URL [PARAMS]     Perform request
    cd                         Change the base URL (e.g. "cd customers/8; cd ../9").
    help                       This information.
    quit                       Adios! (quit shell).
@@ -105,11 +123,15 @@ SHELL COMMANDS
 # \HTTP_VERB ... (no extra stuff for this one command)
 # env -i or such to clear
 
+# FIXME: these suck
 usage_examples = \
 """
 EXAMPLES:
 ---------------------------------------------------------------------------
-    rest-cli -u https://foo.com/api -s
+    $ resht -u https://example.com/api get foo x=1
+    {...}
+
+    $ resht -u https://example.com/api/
     > get site/foo.com -v
     > post site -j domain=foo.com
     > cd site/foo.com
@@ -118,9 +140,10 @@ EXAMPLES:
 
 
 hints = UsageHint(
-    usage_args,
+    usage_overview,
+    usage_examples,
+    usage_arguments,
     usage_params,
     usage_data_paths,
     usage_shell,
-    usage_examples,
 )
