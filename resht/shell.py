@@ -392,8 +392,7 @@ class Shell:
         # FIXME: clean up error handling and printing the response
         answer = None
         if not args['verb'] and self.interactive:
-            # FIXME: should be able to enter shell mode w/o running an initial API; right now this loops
-            raise UserError('No API or command given')
+            return None
         if args['verb'] in self.http_methods:
             # run an API
             try:
