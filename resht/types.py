@@ -144,8 +144,6 @@ class Url(NamedTuple):
         if re.match('^\w+://', url_str):
             (scheme, url_str) = url_str.split('://', 1)
             parts['scheme'] = scheme.lower()
-        else:
-            parts['scheme'] = 'http'
         # check for a path
         if url_str.find('/') == -1:
             hostname = url_str
@@ -156,6 +154,12 @@ class Url(NamedTuple):
         if hostname.find(':') >= 0:
             # chop out the port
            hostname, parts['port'] = hostname.split(':', 1)
+           parts['port'] = int(parts['port'])
+           if not parts['scheme']:
+               if parts['port'] == 80:
+                   parts['scheme'] = 'http'
+               elif parts['port'] == 443:
+                   parts['scheme'] = 'https'
         if not hostname:
             hostname = 'localhost'
         parts['hostname'] = hostname.lower()
@@ -166,6 +170,8 @@ class Url(NamedTuple):
         parts['query'] = parsed.query
         parts['fragment'] = parsed.fragment
         # normalize a bit and supply any defaults
+        if not parts['scheme']:
+           parts['scheme'] = 'https'
         if not parts['port']:
             if parts['scheme'] == 'https':
                 parts['port'] = 443
