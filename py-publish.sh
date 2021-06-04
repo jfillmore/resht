@@ -105,9 +105,9 @@ done
 cd "$BASE_DIR" || fail
 
 build_version=$(python3 -m build --version) \
-    || fail "Please install 'build': python3 -m pip install --upgrade build"
+    || fail "Please install 'build': python3 -m pip install -r requirements-build.txt"
 twine_version=$(python3 -m twine --version) \
-    || fail "Please install 'twine': python3 -m pip install --upgrade twine"
+    || fail "Please install 'twine': python3 -m pip install -r requirements-build.txt"
 
 [ $upload_only -eq 0 ] && {
     echo -e "\033[0;33mBuilding to \033[1m"$(pwd -P)/$build_dir"\033[0;33m using \033[1m$build_version\033[0m" >&2

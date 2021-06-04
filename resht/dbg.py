@@ -58,7 +58,7 @@ class CodeFrame(typing.NamedTuple):
 
 
 class CodeTrace(typing.NamedTuple):
-    frames: list[CodeFrame]
+    frames: typing.List[CodeFrame]
     error: str
     error_type: str
 
