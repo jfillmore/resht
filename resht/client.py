@@ -304,7 +304,7 @@ class RestClient:
             http_resp = urllib.request.urlopen(
                 request,
                 context=self.ssl_ctx if not self.insecure else self.ssl_ctx_insecure,
-                timeout=timeout,
+                timeout=timeout if timeout else None,
             )
         except urllib.request.HTTPError as error_resp:
             http_resp = error_resp
