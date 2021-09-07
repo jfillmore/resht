@@ -40,6 +40,7 @@ ARGUMENTS
                             (e.g. "foo=bar&food=yummy", repeatable).
    -f, --form               Override default of sending JSON data
    -j, --json STRING        Merge JSON-encoded string into API params (repeatable)
+   -t, --timeout SECONDS    Set request timeout in seconds (0=unlimited; default=30)
    -u, --url URL            Base URL for API requests (default: https://localhost/).
 
 

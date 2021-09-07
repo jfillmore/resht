@@ -212,6 +212,7 @@ class Shell:
         args = {
             'FILES': [],
             'api_args': {},
+            'base_url': self.runtime_args['base_url'],
             'basic_auth': None,
             'cmd_args': [],
             'color': self.runtime_args['color'],
@@ -226,7 +227,7 @@ class Shell:
             'redir_type': None,
             'shell': False,
             'stdout_redir': None,
-            'base_url': self.runtime_args['base_url'],
+            'timeout': 30,
             'verb': None,
             'verbose': False,
         }
@@ -306,6 +307,13 @@ class Shell:
                 args['headers'].add('content-type', 'application/x-www-form-urlencoded')
             elif token == '-h' or token == '--help':
                 args['help'] = True
+            elif token == '-t' or token == '--timeout':
+                i += 1
+                if i == len(tokens):
+                    raise Exception("Missing value for HTTP header.")
+                if not tokens[i].isnumeric():
+                    raise Exception("Numeric option for request timeout expected.")
+                args['timeout'] = int(tokens[i])
             elif token == '-H' or token == '--header':
                 i += 1
                 if i == len(tokens):
@@ -403,6 +411,7 @@ class Shell:
                     body=args['api_args'],
                     query=args['query'],
                     headers=args['headers'],
+                    timeout=args['timeout'],
                     verbose=args['verbose'],
                     basic_auth=args['basic_auth'],
                     full=True,

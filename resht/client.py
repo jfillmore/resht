@@ -186,6 +186,7 @@ class RestClient:
             body:Union[dict,str] = None,
             query:Union[dict,list,str] = None,
             headers:dict = None,
+            timeout:int = None,
             verbose:bool = False,
             full:bool = False,
             basic_auth:str = None,
@@ -303,6 +304,7 @@ class RestClient:
             http_resp = urllib.request.urlopen(
                 request,
                 context=self.ssl_ctx if not self.insecure else self.ssl_ctx_insecure,
+                timeout=timeout,
             )
         except urllib.request.HTTPError as error_resp:
             http_resp = error_resp
@@ -340,6 +342,7 @@ class RestClient:
                 decoded = resp_data.decode(charset.split('=')[1])
         if resp_content_type and resp_content_type.startswith('application/json'):
             try:
+                # FIXME: shouldn't this be 'decoded' in case of non-utf8?
                 decoded = json.loads(resp_data)
             except Exception as e:
                 raise ValueError('Failed to decode API response\n' + str(resp_data)) from e

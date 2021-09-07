@@ -171,7 +171,10 @@ class Url(NamedTuple):
         parts['fragment'] = parsed.fragment
         # normalize a bit and supply any defaults
         if not parts['scheme']:
-           parts['scheme'] = 'https'
+            if not parts['port'] or parts['port'] == 443:
+               parts['scheme'] = 'https'
+            else:
+               parts['scheme'] = 'http'
         if not parts['port']:
             if parts['scheme'] == 'https':
                 parts['port'] = 443
