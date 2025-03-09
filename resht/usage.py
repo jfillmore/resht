@@ -30,26 +30,24 @@ usage_arguments = """
 ARGUMENTS
 ---------------------------------------------------------------------------
 
-    REQUEST ARGS
+   REQUEST ARGS
    -B, --basic USER:PASS    HTTP basic authentication.
-   -d, --data DATA          Set request body to the string given; cannot be
-                            used with API params or --json
    -H, --header HEADER      HTTP header (e.g. 'Foo: bar', repeatable)
    -I, --insecure           Do not valid SSL certificates (dangerous!)
    -Q, --query QUERY_DATA   Extra query data to merge
                             (e.g. "foo=bar&food=yummy", repeatable).
    -f, --form               Override default of sending JSON data
-   -j, --json STRING        Merge JSON-encoded string into API params (repeatable)
+   -j, --json -|PATH|STR    Merge JSON into API params from stdin/file/str (repeatable)
    -t, --timeout SECONDS    Set request timeout in seconds (0=unlimited; default=30)
    -u, --url URL            Base URL for API requests (default: https://localhost/).
 
 
-    MISC ARGS
+   MISC ARGS
    -h, --help               This information.
    -s, --shell              Start shell mode; run initial API
    -v, --verbose            Print verbose debugging info to stderr.
 
-    OUTPUT ARGS:
+   OUTPUT ARGS:
    -c, --color              Color formatted JSON responses (default=True).
    -C, --no-color           Do not color formatted JSON responses.
    -r, --raw                Don't format response data; return raw response.
@@ -68,7 +66,7 @@ API PARAMS
     objects easy to quickly define. Non-boolean values are assigned using
     the delimiter "=" (string) or ":=" (JSON encoded).
 
-    Arrays must be created using ":=" or using "-d|--data".
+    Arrays must be created using ":=" or using "-j|--json".
 
     BOOLEANS:
        foo                      {"foo": true}

@@ -72,11 +72,11 @@ while [ $# -gt 0 ]; do
             usage
             exit
             ;;
-        --build|-b)
+        --build-only|-b)
             [ $upload_only -eq 1 ] && fail "Cannot use --build-only and --upload-only together"
             build_only=1
             ;;
-        --upload|-u)
+        --upload-only|-u)
             [ $build_only -eq 1 ] && fail "Cannot use --build-only and --upload-only together"
             upload_only=1
             ;;

@@ -98,20 +98,20 @@ class Shell:
             self.print_help()
             return
         if args['shell']:
-            self.start(cmd=argv)
+            self.start(cmd=args)
         elif not args['verb']:
             # nothing given, but not in shell mode... offer help!
             self.print_help()
             self.last_rv = 1
         else:
             # just do a one-off command
-            self.exec_cmd(cmd=argv, print_meta=args['verbose'])
+            self.exec_cmd(cmd=args, print_meta=args['verbose'])
 
     def start(
-            self,
-            cmd = None,
-            read_history:bool = True,
-        ):
+        self,
+        cmd = None,
+        read_history:bool = True,
+    ):
         # prepare the shell
         self.interactive = True
         if not cmd:
@@ -207,11 +207,12 @@ class Shell:
         ]
 
     def parse_cmd(self, expr):
-        # TODO: clean this up so we're more explicit about what we're doing: an API request or shell command, and where to find args
+        # DREAM: clean this up so we're more explicit about what we're doing: an API request or shell command, and where to find args
+        # DREAM: return a dataclass for easier handling
         # some args have defaults based on our runtime args
         args = {
             'FILES': [],
-            'api_args': {},
+            'api_args': {},  # becomes request payload
             'base_url': self.runtime_args['base_url'],
             'basic_auth': None,
             'cmd_args': [],
@@ -233,8 +234,12 @@ class Shell:
         }
         if isinstance(expr, str):
             tokens = shlex.split(expr)
+        elif isinstance(expr, list):
+            tokens = expr
+        elif isinstance(expr, dict):
+            return expr
         else:
-            tokens = expr  # already a list
+            raise ValueError('Invalid input type for parse_cmd')
 
         i = 0
         # iterate through each paramter and handle it
@@ -328,8 +333,19 @@ class Shell:
                 i += 1
                 if i == len(tokens):
                     raise Exception("Missing value for JSON API params.")
+                # We support a few inputs:
+                # - = read JSON from stdin
+                # path = read JSON from file
+                # ... = use literal JSON string
                 try:
-                    api_args = self.decode(tokens[i])
+                    if tokens[i] == '-':
+                        json_str = ''.join(sys.stdin.readlines())
+                        api_args = json.loads(json_str)
+                    elif os.path.isfile(tokens[i]):
+                        with open(tokens[i], 'r') as f:
+                            api_args = json.load(f)
+                    else:
+                        api_args = self.decode(tokens[i])
                     if isinstance(api_args, dict):
                         args['api_args'].update(api_args)
                     else:
