@@ -141,7 +141,7 @@ class Url(NamedTuple):
             'fragment': None
         }
         # parse out the scheme, if present
-        if re.match('^\w+://', url_str):
+        if re.match(r'^\w+://', url_str):
             (scheme, url_str) = url_str.split('://', 1)
             parts['scheme'] = scheme.lower()
         # check for a path

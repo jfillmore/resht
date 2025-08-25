@@ -14,7 +14,7 @@ import sys
 
 
 def usage():
-    sys.stdout.write("""usage: jsonx [ARGS] [JSON_FILE]
+    sys.stdout.write(r"""usage: jsonx [ARGS] [JSON_FILE]
 
 Pretty prints JSON by default. If a file is given it will be read for JSON
 data; otherwise STDIN will be read instead.

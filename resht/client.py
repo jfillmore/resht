@@ -317,10 +317,11 @@ class RestClient:
                 no_color=no_color,
             )
             dbg.log(
-                'Response Headers:', data={
-                    name: val
+                # We use a list because things like Set-Cookie can repeat.
+                'Response Headers:', data=sorted([
+                    f'{name}: {val}'
                     for name, val in http_resp.headers.items()
-                },
+                ]),
                 no_color=no_color
             )
 
